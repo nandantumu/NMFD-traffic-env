@@ -1,0 +1,38 @@
+[project]
+name = "nmfd-traffic-env"
+version = "0.1.0"
+description = "Reusable JAX environment for regional NMFD traffic control with a deterministic DPC policy"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "flax==0.10.4",
+    "jax==0.4.33",
+    "numpy>=1.26,<3",
+    "optax==0.2.5",
+]
+
+[project.scripts]
+nmfd-evaluate = "nmfd_traffic.cli:evaluate_main"
+nmfd-train = "nmfd_traffic.cli:train_main"
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+nmfd_traffic = ["py.typed"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9,<10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
