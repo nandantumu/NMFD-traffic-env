@@ -30,6 +30,13 @@ hidden_dim = 512
 num_hidden_layers = 5
 activation = "gelu"
 
+[naive_mppi]
+samples = 128
+iterations = 1
+temperature = 1.0
+damping = 1e-6
+noise_std = 1.0
+
 [training]
 sample_pool_size = 50000
 epochs = 100

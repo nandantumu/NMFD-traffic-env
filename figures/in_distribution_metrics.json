@@ -1,0 +1,34 @@
+{
+  "controllers": {
+    "dpc": {
+      "runtime_ms_per_step": 0.02835106017300859,
+      "terminal_vehicles_mean": 137.25180053710938,
+      "terminal_vehicles_std": 20.2170467376709,
+      "vehicle_hours_mean": 11224.0078125,
+      "vehicle_hours_std": 501.40045166015625
+    },
+    "naive_mppi": {
+      "runtime_ms_per_step": 40.74310804979177,
+      "terminal_vehicles_mean": 10560.42578125,
+      "terminal_vehicles_std": 284.09954833984375,
+      "vehicle_hours_mean": 18917.818359375,
+      "vehicle_hours_std": 390.53656005859375
+    },
+    "open_gates": {
+      "runtime_ms_per_step": 0.009021784935612231,
+      "terminal_vehicles_mean": 10360.828125,
+      "terminal_vehicles_std": 233.00856018066406,
+      "vehicle_hours_mean": 17886.1015625,
+      "vehicle_hours_std": 341.3726501464844
+    }
+  },
+  "horizon": 40,
+  "naive_mppi_settings": {
+    "iterations": 1,
+    "noise_std": 1.0,
+    "samples": 128,
+    "temperature": 1.0
+  },
+  "rollouts": 10,
+  "scenario": "in_distribution"
+}

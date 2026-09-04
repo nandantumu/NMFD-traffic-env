@@ -1,9 +1,10 @@
-"""Regional NMFD traffic environment and deterministic DPC policy."""
+"""Regional NMFD traffic environment with DPC and naive MPPI controllers."""
 
 from .checkpoints import load_parameters, save_parameters
 from .config import (
     ExperimentConfig,
     InitialStateScenario,
+    MPPIConfig,
     NMFDParameters,
     ObjectiveConfig,
     PolicyConfig,
@@ -12,6 +13,12 @@ from .config import (
     load_config,
 )
 from .dynamics import dynamics, rk4_step, rollout_controls, step
+from .mppi import (
+    initial_control_plan,
+    rollout_naive_mppi,
+    select_action,
+    update_control_plan,
+)
 from .policy import DPCPolicy, create_policy
 from .scenarios import sample_initial_states
 from .training import (
@@ -27,6 +34,7 @@ __all__ = [
     "DPCTrainState",
     "ExperimentConfig",
     "InitialStateScenario",
+    "MPPIConfig",
     "NMFDParameters",
     "ObjectiveConfig",
     "PolicyConfig",
@@ -36,13 +44,17 @@ __all__ = [
     "create_train_state",
     "dpc_loss",
     "dynamics",
+    "initial_control_plan",
     "load_config",
     "load_parameters",
     "make_train_step",
     "rk4_step",
     "rollout_controls",
+    "rollout_naive_mppi",
     "rollout_policy",
     "sample_initial_states",
     "save_parameters",
+    "select_action",
     "step",
+    "update_control_plan",
 ]

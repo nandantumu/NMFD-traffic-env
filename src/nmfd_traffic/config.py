@@ -51,6 +51,17 @@ class PolicyConfig:
 
 
 @dataclass(frozen=True)
+class MPPIConfig:
+    """Sampling settings for the horizon-based naive MPPI controller."""
+
+    samples: int
+    iterations: int
+    temperature: float
+    damping: float
+    noise_std: float
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
     sample_pool_size: int
     epochs: int
@@ -88,6 +99,7 @@ class ExperimentConfig:
     environment: NMFDParameters
     objective: ObjectiveConfig
     policy: PolicyConfig
+    naive_mppi: MPPIConfig
     training: TrainingConfig
     scenarios: dict[str, InitialStateScenario]
 
@@ -217,6 +229,20 @@ def load_config(path: str | Path) -> ExperimentConfig:
     )
     if policy.hidden_dim < 1 or policy.num_hidden_layers < 1:
         raise ValueError("policy dimensions must be positive")
+    mppi_raw = raw.get("naive_mppi", {})
+    naive_mppi = MPPIConfig(
+        samples=int(mppi_raw.get("samples", 128)),
+        iterations=int(mppi_raw.get("iterations", 1)),
+        temperature=float(mppi_raw.get("temperature", 1.0)),
+        damping=float(mppi_raw.get("damping", 1e-6)),
+        noise_std=float(mppi_raw.get("noise_std", 1.0)),
+    )
+    if naive_mppi.samples < 1 or naive_mppi.iterations < 1:
+        raise ValueError("MPPI samples and iterations must be positive")
+    if naive_mppi.temperature <= 0.0 or naive_mppi.damping <= 0.0:
+        raise ValueError("MPPI temperature and damping must be positive")
+    if naive_mppi.noise_std <= 0.0:
+        raise ValueError("MPPI noise_std must be positive")
     training_raw = raw["training"]
     training = TrainingConfig(
         sample_pool_size=int(training_raw.get("sample_pool_size", 50_000)),
@@ -236,6 +262,7 @@ def load_config(path: str | Path) -> ExperimentConfig:
         environment=environment,
         objective=objective,
         policy=policy,
+        naive_mppi=naive_mppi,
         training=training,
         scenarios=scenarios,
     )

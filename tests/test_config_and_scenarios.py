@@ -15,6 +15,8 @@ def test_seven_region_config_and_routing():
     params = config.environment
     assert params.num_regions == 7
     assert params.state_dim == params.control_dim == 49
+    assert config.naive_mppi.samples == 128
+    assert config.naive_mppi.iterations == 1
     theta = np.asarray(params.theta)
     assert theta.shape == (7, 7, 7)
     for source in range(7):
