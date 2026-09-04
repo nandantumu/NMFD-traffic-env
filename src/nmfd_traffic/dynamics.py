@@ -14,9 +14,11 @@ def dynamics(
 ) -> jax.Array:
     """Evaluate the continuous-time NMFD derivative.
 
-    The last dimension of ``state``, ``control``, and ``demand`` is flattened
-    row-major ``(origin region, destination region)``. Leading batch dimensions
-    are supported. Demand is an optional exogenous OD arrival rate.
+    The last dimension of ``state`` and ``demand`` is a flattened row-major
+    ``(current region, final destination)`` matrix. The last dimension of
+    ``control`` is a flattened row-major ``(sending region, receiving region)``
+    matrix. Leading batch dimensions are supported. Demand is an optional
+    exogenous arrival rate for each state cell.
     """
 
     regions = params.num_regions
@@ -35,7 +37,7 @@ def dynamics(
         d = jnp.reshape(demand, (-1, regions, regions))
         d = jnp.broadcast_to(d, x.shape)
 
-    accumulation = jnp.clip(jnp.sum(x, axis=-1), 0.0, 10_000.0)
+    accumulation = jnp.sum(x, axis=-1)
     production = (
         params.a[None, :] * accumulation**3
         + params.b[None, :] * accumulation**2

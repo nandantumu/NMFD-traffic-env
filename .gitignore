@@ -8,4 +8,5 @@ build/
 *.egg-info/
 checkpoints/*_trained.msgpack
 checkpoints/*.json
+!checkpoints/dpc_policy.provenance.json
 results/

@@ -11,7 +11,6 @@ from nmfd_traffic import (
     sample_initial_states,
 )
 
-
 config = load_config(Path("configs/seven_region.toml"))
 policy = create_policy(config.policy, config.environment)
 template = policy.init(

@@ -7,7 +7,9 @@ from typing import Any
 from flax import serialization
 
 
-def save_parameters(path: str | Path, parameters: Any, metadata: dict | None = None) -> None:
+def save_parameters(
+    path: str | Path, parameters: Any, metadata: dict | None = None
+) -> None:
     """Save inference parameters as Flax msgpack, without optimizer state."""
 
     output = Path(path)

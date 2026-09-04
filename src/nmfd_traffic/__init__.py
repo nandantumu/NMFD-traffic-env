@@ -1,4 +1,4 @@
-"""Regional NMFD traffic environment with DPC and naive MPPI controllers."""
+"""Regional NMFD traffic environment with DPC and MPPI controllers."""
 
 from .checkpoints import load_parameters, save_parameters
 from .config import (
@@ -15,6 +15,7 @@ from .config import (
 from .dynamics import dynamics, rk4_step, rollout_controls, step
 from .mppi import (
     initial_control_plan,
+    rollout_mppi,
     rollout_naive_mppi,
     select_action,
     update_control_plan,
@@ -50,6 +51,7 @@ __all__ = [
     "make_train_step",
     "rk4_step",
     "rollout_controls",
+    "rollout_mppi",
     "rollout_naive_mppi",
     "rollout_policy",
     "sample_initial_states",

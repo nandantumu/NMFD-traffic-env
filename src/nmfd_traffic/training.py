@@ -15,7 +15,9 @@ class DPCTrainState(train_state.TrainState):
     """Flax training state for the deterministic DPC policy."""
 
 
-def create_train_state(key: jax.Array, policy, training: TrainingConfig) -> DPCTrainState:
+def create_train_state(
+    key: jax.Array, policy, training: TrainingConfig
+) -> DPCTrainState:
     sample = jnp.zeros((1, policy.input_dim), dtype=jnp.float32)
     variables = policy.init(key, sample, train=False)
     optimizer = optax.chain(

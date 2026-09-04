@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import math
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,8 @@ class NMFDParameters:
 
 @dataclass(frozen=True)
 class ObjectiveConfig:
+    """Finite-horizon controller objective and its nonnegative weights."""
+
     horizon: int
     state_weight: float
     control_weight: float
@@ -45,6 +48,8 @@ class ObjectiveConfig:
 
 @dataclass(frozen=True)
 class PolicyConfig:
+    """Architecture of the deterministic DPC multilayer perceptron."""
+
     hidden_dim: int
     num_hidden_layers: int
     activation: str
@@ -52,17 +57,28 @@ class PolicyConfig:
 
 @dataclass(frozen=True)
 class MPPIConfig:
-    """Sampling settings for the horizon-based naive MPPI controller."""
+    """Sampling settings for 2017 information-theoretic MPPI.
+
+    temperature is the paper's inverse-temperature parameter lambda.
+    noise_std defines the isotropic covariance Sigma = noise_std**2 I.
+    alpha is the fraction of zero-centered recovery samples and also gives
+    the importance-correction coefficient gamma = lambda * (1 - alpha).
+    The final two fields define the JAX-native Savitzky--Golay update filter.
+    """
 
     samples: int
     iterations: int
     temperature: float
-    damping: float
     noise_std: float
+    alpha: float
+    smoothing_window: int
+    smoothing_polynomial: int
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
+    """Optimization and initial-state sampling settings for DPC training."""
+
     sample_pool_size: int
     epochs: int
     steps_per_epoch: int
@@ -74,6 +90,8 @@ class TrainingConfig:
 
 @dataclass(frozen=True)
 class CellOverride:
+    """Distribution override for one ``(current region, destination)`` cell."""
+
     row: int
     column: int
     mean: float
@@ -84,6 +102,8 @@ class CellOverride:
 
 @dataclass(frozen=True)
 class InitialStateScenario:
+    """Clipped normal distribution used to sample initial traffic states."""
+
     name: str
     distribution: str
     mean: float
@@ -95,13 +115,21 @@ class InitialStateScenario:
 
 @dataclass(frozen=True)
 class ExperimentConfig:
+    """Complete environment, controller, training, and scenario configuration."""
+
     seed: int
     environment: NMFDParameters
     objective: ObjectiveConfig
     policy: PolicyConfig
-    naive_mppi: MPPIConfig
+    mppi: MPPIConfig
     training: TrainingConfig
     scenarios: dict[str, InitialStateScenario]
+
+    @property
+    def naive_mppi(self) -> MPPIConfig:
+        """Return MPPI settings under the configuration's former field name."""
+
+        return self.mppi
 
 
 def build_shortest_path_routing(adjacency: np.ndarray) -> np.ndarray:
@@ -146,34 +174,63 @@ def build_shortest_path_routing(adjacency: np.ndarray) -> np.ndarray:
     return theta
 
 
-def _scenario_from_mapping(name: str, raw: dict[str, Any], regions: int) -> InitialStateScenario:
+def _scenario_from_mapping(
+    name: str, raw: dict[str, Any], regions: int
+) -> InitialStateScenario:
     distribution = str(raw.get("distribution", "normal")).lower()
     if distribution != "normal":
-        raise ValueError(f"scenario {name!r}: only normal sampling is currently supported")
+        raise ValueError(
+            f"scenario {name!r}: only normal sampling is currently supported"
+        )
 
     lower = float(raw.get("min_value", 0.0))
     upper = float(raw["max_value"])
+    mean = float(raw["mean"])
+    std = float(raw["std"])
+    if not all(math.isfinite(value) for value in (lower, upper, mean, std)):
+        raise ValueError(f"scenario {name!r}: distribution values must be finite")
+    if std < 0.0:
+        raise ValueError(f"scenario {name!r}: std must be nonnegative")
+    if lower > upper:
+        raise ValueError(f"scenario {name!r}: min_value must not exceed max_value")
     overrides = []
     for item in raw.get("overrides", []):
         row = int(item["row"])
         column = int(item["column"])
         if not (0 <= row < regions and 0 <= column < regions):
-            raise ValueError(f"scenario {name!r}: override ({row}, {column}) is out of range")
-        overrides.append(
-            CellOverride(
-                row=row,
-                column=column,
-                mean=float(item.get("mean", raw["mean"])),
-                std=float(item.get("std", raw["std"])),
-                min_value=float(item.get("min_value", lower)),
-                max_value=float(item.get("max_value", upper)),
+            raise ValueError(
+                f"scenario {name!r}: override ({row}, {column}) is out of range"
             )
+        override = CellOverride(
+            row=row,
+            column=column,
+            mean=float(item.get("mean", mean)),
+            std=float(item.get("std", std)),
+            min_value=float(item.get("min_value", lower)),
+            max_value=float(item.get("max_value", upper)),
         )
+        if not all(
+            math.isfinite(value)
+            for value in (
+                override.mean,
+                override.std,
+                override.min_value,
+                override.max_value,
+            )
+        ):
+            raise ValueError(f"scenario {name!r}: override values must be finite")
+        if override.std < 0.0:
+            raise ValueError(f"scenario {name!r}: override std must be nonnegative")
+        if override.min_value > override.max_value:
+            raise ValueError(
+                f"scenario {name!r}: override min_value must not exceed max_value"
+            )
+        overrides.append(override)
     return InitialStateScenario(
         name=name,
         distribution=distribution,
-        mean=float(raw["mean"]),
-        std=float(raw["std"]),
+        mean=mean,
+        std=std,
         min_value=lower,
         max_value=upper,
         overrides=tuple(overrides),
@@ -189,6 +246,8 @@ def load_config(path: str | Path) -> ExperimentConfig:
 
     env_raw = raw["environment"]
     regions = int(env_raw["num_regions"])
+    if regions < 1:
+        raise ValueError("num_regions must be positive")
     adjacency = np.asarray(env_raw["adjacency"], dtype=np.float32)
     if adjacency.shape != (regions, regions):
         raise ValueError(
@@ -207,6 +266,18 @@ def load_config(path: str | Path) -> ExperimentConfig:
         u_low=float(env_raw.get("u_low", 0.2)),
         u_high=float(env_raw.get("u_high", 0.8)),
     )
+    physical_values = (
+        environment.dt,
+        environment.u_low,
+        environment.u_high,
+        *np.asarray(environment.a),
+        *np.asarray(environment.b),
+        *np.asarray(environment.c),
+    )
+    if not all(math.isfinite(float(value)) for value in physical_values):
+        raise ValueError("environment parameters must be finite")
+    if environment.dt <= 0.0:
+        raise ValueError("dt must be positive")
     if environment.n_substeps < 1:
         raise ValueError("n_substeps must be positive")
     if environment.u_low >= environment.u_high:
@@ -221,6 +292,13 @@ def load_config(path: str | Path) -> ExperimentConfig:
     )
     if objective.horizon < 1:
         raise ValueError("objective horizon must be positive")
+    objective_weights = (
+        objective.state_weight,
+        objective.control_weight,
+        objective.control_rate_weight,
+    )
+    if not all(math.isfinite(value) and value >= 0.0 for value in objective_weights):
+        raise ValueError("objective weights must be finite and nonnegative")
     policy_raw = raw["policy"]
     policy = PolicyConfig(
         hidden_dim=int(policy_raw.get("hidden_dim", 256)),
@@ -229,20 +307,40 @@ def load_config(path: str | Path) -> ExperimentConfig:
     )
     if policy.hidden_dim < 1 or policy.num_hidden_layers < 1:
         raise ValueError("policy dimensions must be positive")
-    mppi_raw = raw.get("naive_mppi", {})
-    naive_mppi = MPPIConfig(
+    if policy.activation.lower() not in {"gelu", "relu", "silu", "tanh"}:
+        raise ValueError(f"unsupported policy activation {policy.activation!r}")
+    mppi_raw = raw.get("mppi", raw.get("naive_mppi", {}))
+    mppi = MPPIConfig(
         samples=int(mppi_raw.get("samples", 128)),
         iterations=int(mppi_raw.get("iterations", 1)),
         temperature=float(mppi_raw.get("temperature", 1.0)),
-        damping=float(mppi_raw.get("damping", 1e-6)),
         noise_std=float(mppi_raw.get("noise_std", 1.0)),
+        alpha=float(mppi_raw.get("alpha", 0.01)),
+        smoothing_window=int(mppi_raw.get("smoothing_window", 5)),
+        smoothing_polynomial=int(mppi_raw.get("smoothing_polynomial", 2)),
     )
-    if naive_mppi.samples < 1 or naive_mppi.iterations < 1:
+    if mppi.samples < 1 or mppi.iterations < 1:
         raise ValueError("MPPI samples and iterations must be positive")
-    if naive_mppi.temperature <= 0.0 or naive_mppi.damping <= 0.0:
-        raise ValueError("MPPI temperature and damping must be positive")
-    if naive_mppi.noise_std <= 0.0:
+    mppi_floats = (
+        mppi.temperature,
+        mppi.noise_std,
+        mppi.alpha,
+    )
+    if not all(math.isfinite(value) for value in mppi_floats):
+        raise ValueError("MPPI floating-point settings must be finite")
+    if mppi.temperature <= 0.0:
+        raise ValueError("MPPI temperature must be positive")
+    if mppi.noise_std <= 0.0:
         raise ValueError("MPPI noise_std must be positive")
+    if not 0.0 <= mppi.alpha <= 1.0:
+        raise ValueError("MPPI alpha must be between zero and one")
+    if mppi.smoothing_window < 1 or mppi.smoothing_window % 2 == 0:
+        raise ValueError("MPPI smoothing_window must be a positive odd integer")
+    if not 0 <= mppi.smoothing_polynomial < mppi.smoothing_window:
+        raise ValueError(
+            "MPPI smoothing_polynomial must be nonnegative and smaller than "
+            "smoothing_window"
+        )
     training_raw = raw["training"]
     training = TrainingConfig(
         sample_pool_size=int(training_raw.get("sample_pool_size", 50_000)),
@@ -253,16 +351,41 @@ def load_config(path: str | Path) -> ExperimentConfig:
         weight_decay=float(training_raw.get("weight_decay", 1e-5)),
         gradient_clip=float(training_raw.get("gradient_clip", 1.0)),
     )
+    if (
+        min(
+            training.sample_pool_size,
+            training.epochs,
+            training.steps_per_epoch,
+            training.batch_size,
+        )
+        < 1
+    ):
+        raise ValueError("training sizes and iteration counts must be positive")
+    training_floats = (
+        training.learning_rate,
+        training.weight_decay,
+        training.gradient_clip,
+    )
+    if not all(math.isfinite(value) for value in training_floats):
+        raise ValueError("training floating-point settings must be finite")
+    if training.learning_rate <= 0.0:
+        raise ValueError("training learning_rate must be positive")
+    if training.weight_decay < 0.0:
+        raise ValueError("training weight_decay must be nonnegative")
+    if training.gradient_clip <= 0.0:
+        raise ValueError("training gradient_clip must be positive")
     scenarios = {
         name: _scenario_from_mapping(name, scenario_raw, regions)
         for name, scenario_raw in raw["scenarios"].items()
     }
+    if not scenarios:
+        raise ValueError("at least one initial-state scenario is required")
     return ExperimentConfig(
         seed=int(raw.get("seed", 0)),
         environment=environment,
         objective=objective,
         policy=policy,
-        naive_mppi=naive_mppi,
+        mppi=mppi,
         training=training,
         scenarios=scenarios,
     )

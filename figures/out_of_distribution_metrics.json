@@ -1,33 +1,62 @@
 {
   "controllers": {
     "dpc": {
-      "runtime_ms_per_step": 0.02488984988303855,
-      "terminal_vehicles_mean": 8945.00390625,
-      "terminal_vehicles_std": 2763.453369140625,
-      "vehicle_hours_mean": 21703.423828125,
-      "vehicle_hours_std": 719.2806396484375
+      "runtime_ms_per_step": 0.023843235103413463,
+      "terminal_vehicles_mean": 8865.234375,
+      "terminal_vehicles_std": 2720.888916015625,
+      "vehicle_hours_mean": 21669.34765625,
+      "vehicle_hours_std": 703.1185302734375
     },
-    "naive_mppi": {
-      "runtime_ms_per_step": 43.529139349993784,
-      "terminal_vehicles_mean": 13945.28125,
-      "terminal_vehicles_std": 316.79229736328125,
-      "vehicle_hours_mean": 25912.70703125,
-      "vehicle_hours_std": 686.4999389648438
+    "mppi": {
+      "runtime_ms_per_step": 37.32459319522604,
+      "terminal_vehicles_mean": 572.8385009765625,
+      "terminal_vehicles_std": 122.64925384521484,
+      "vehicle_hours_mean": 18385.158203125,
+      "vehicle_hours_std": 902.7550659179688
     },
     "open_gates": {
-      "runtime_ms_per_step": 0.009150755067821592,
-      "terminal_vehicles_mean": 13757.4326171875,
-      "terminal_vehicles_std": 274.3912048339844,
-      "vehicle_hours_mean": 24239.95703125,
-      "vehicle_hours_std": 562.4403076171875
+      "runtime_ms_per_step": 0.00848020747071132,
+      "terminal_vehicles_mean": 10330.044921875,
+      "terminal_vehicles_std": 66.37784576416016,
+      "vehicle_hours_mean": 22015.76953125,
+      "vehicle_hours_std": 586.691162109375
     }
   },
   "horizon": 40,
-  "naive_mppi_settings": {
+  "mppi_settings": {
+    "alpha": 0.01,
+    "control_rate_weight": 0.0,
+    "control_weight": 0.0,
+    "covariance": "noise_std^2 * identity",
+    "doi": "10.1109/TRO.2018.2865891",
+    "formulation": "Williams et al. 2017 information-theoretic MPC",
+    "gamma": 0.99,
     "iterations": 1,
     "noise_std": 1.0,
     "samples": 128,
-    "temperature": 1.0
+    "smoothing_polynomial": 2,
+    "smoothing_window": 5,
+    "temperature": 1.0,
+    "uses_nmfd_objective_extensions": false
+  },
+  "reproducibility": {
+    "checkpoint": {
+      "sha256": "8b0737b167edcb582784de894c3be5856a2826a0012637266264fb879cdfe47c",
+      "source": "package:nmfd_traffic/data/dpc_policy.msgpack"
+    },
+    "config": {
+      "sha256": "0aacb18edc8759b1eae2cc8a6d09732c01f611581b5321e06e8ad05eb0f80839",
+      "source": "package:nmfd_traffic/data/seven_region.toml"
+    },
+    "generated_at_utc": "2026-09-04T18:41:19.837210+00:00",
+    "repository_commit": "3ef17aa83872f1f4b14d3e4e4d671ee5e72620e5",
+    "repository_dirty": true,
+    "seed": 0,
+    "software": {
+      "jax": "0.4.33",
+      "nmfd_traffic_env": "0.1.0",
+      "python": "3.12.13"
+    }
   },
   "rollouts": 10,
   "scenario": "out_of_distribution"

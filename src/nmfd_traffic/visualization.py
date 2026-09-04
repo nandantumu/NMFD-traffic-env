@@ -11,10 +11,9 @@ import numpy as np
 
 from .config import NMFDParameters
 
-
 COLORS = {
     "DPC": "#0072B2",
-    "Naive MPPI": "#D55E00",
+    "MPPI": "#D55E00",
     "Open gates": "#777777",
 }
 
@@ -72,14 +71,18 @@ def plot_per_region_accumulation(
     )
     for region, axis in enumerate(axes.flat[:regions]):
         for label, states in trajectories.items():
-            reshaped = np.asarray(states).reshape(states.shape[0], states.shape[1], regions, regions)
+            reshaped = np.asarray(states).reshape(
+                states.shape[0], states.shape[1], regions, regions
+            )
             accumulation = reshaped[:, :, region, :].sum(axis=-1)
             time_minutes = np.arange(accumulation.shape[1]) * params.dt / 60.0
             mean = accumulation.mean(axis=0)
             std = accumulation.std(axis=0)
             color = COLORS.get(label)
             axis.plot(time_minutes, mean, label=label, color=color, linewidth=1.5)
-            axis.fill_between(time_minutes, mean - std, mean + std, color=color, alpha=0.13)
+            axis.fill_between(
+                time_minutes, mean - std, mean + std, color=color, alpha=0.13
+            )
         axis.set_title(f"Region {region}")
         axis.grid(alpha=0.18, linewidth=0.6)
     for axis in axes.flat[regions:]:
@@ -118,9 +121,13 @@ def plot_mean_controls(
     np.fill_diagonal(valid, False)
     image = None
     for axis, (label, values) in zip(axes.flat, controls.items(), strict=True):
-        mean = np.asarray(values).mean(axis=(0, 1)).reshape(
-            params.num_regions,
-            params.num_regions,
+        mean = (
+            np.asarray(values)
+            .mean(axis=(0, 1))
+            .reshape(
+                params.num_regions,
+                params.num_regions,
+            )
         )
         shown = np.where(valid, mean, np.nan)
         image = axis.imshow(

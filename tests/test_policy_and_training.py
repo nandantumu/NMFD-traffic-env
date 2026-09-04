@@ -13,7 +13,6 @@ from nmfd_traffic import (
     sample_initial_states,
 )
 
-
 CONFIG = Path(__file__).parents[1] / "configs" / "seven_region.toml"
 
 
@@ -41,6 +40,8 @@ def test_one_training_update_is_finite():
         config.scenarios["in_distribution"],
         config.environment,
     )
-    new_state, metrics = make_train_step(config.environment, small_objective)(state, initial)
+    new_state, metrics = make_train_step(config.environment, small_objective)(
+        state, initial
+    )
     assert int(new_state.step) == 1
     assert np.isfinite(float(metrics["loss"]))
