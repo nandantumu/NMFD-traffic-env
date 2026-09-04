@@ -8,7 +8,7 @@ import subprocess
 import time
 from collections.abc import Sequence
 from contextlib import ExitStack
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from importlib import metadata, resources
 from pathlib import Path
@@ -21,8 +21,9 @@ from .checkpoints import load_parameters, save_parameters
 from .config import ExperimentConfig, load_config
 from .dynamics import rollout_controls
 from .mppi import rollout_mppi
+from .objective import total_vehicle_time
 from .policy import create_policy
-from .scenarios import sample_initial_states
+from .scenarios import sample_scenario
 from .training import create_train_state, make_train_step, rollout_policy
 from .visualization import (
     plot_mean_controls,
@@ -32,7 +33,6 @@ from .visualization import (
 )
 
 DEFAULT_CONFIG_RESOURCE = "seven_region.toml"
-DEFAULT_CHECKPOINT_RESOURCE = "dpc_policy.msgpack"
 
 
 def _positive_int(value: str) -> int:
@@ -116,6 +116,16 @@ def _reproducibility_metadata(
     checkpoint_reference: str,
     seed: int,
 ) -> dict[str, object]:
+    checkpoint = {
+        "source": checkpoint_reference,
+        "sha256": _sha256(checkpoint_path),
+    }
+    sidecar = checkpoint_path.with_suffix(".json")
+    if sidecar.is_file():
+        checkpoint["provenance"] = {
+            "source": str(sidecar.resolve()),
+            "sha256": _sha256(sidecar),
+        }
     return {
         "generated_at_utc": datetime.now(UTC).isoformat(),
         "seed": seed,
@@ -123,10 +133,7 @@ def _reproducibility_metadata(
             "source": config_reference,
             "sha256": _sha256(config_path),
         },
-        "checkpoint": {
-            "source": checkpoint_reference,
-            "sha256": _sha256(checkpoint_path),
-        },
+        "checkpoint": checkpoint,
         "software": {
             "nmfd_traffic_env": _package_version(),
             "python": platform.python_version(),
@@ -150,11 +157,12 @@ def _evaluation_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        help="DPC parameters; defaults to the packaged seven-region checkpoint",
+        required=True,
+        help="DPC parameters produced by nmfd-train",
     )
     parser.add_argument(
         "--scenario",
-        default="in_distribution",
+        default="nominal",
         help="name of any scenario defined by the selected configuration",
     )
     parser.add_argument("--rollouts", type=_positive_int, default=100)
@@ -183,12 +191,12 @@ def _timed_rollout(function, *arguments, steps: int, rollouts: int):
 def _trajectory_metrics(trajectory: np.ndarray, dt: float) -> dict[str, float]:
     totals = trajectory[:, 1:, :].sum(axis=-1)
     terminal = totals[:, -1]
-    vehicle_hours = totals.sum(axis=-1) * dt / 3600.0
+    vehicle_time = np.asarray(total_vehicle_time(jnp.asarray(trajectory), dt))
     return {
         "terminal_vehicles_mean": float(terminal.mean()),
         "terminal_vehicles_std": float(terminal.std()),
-        "vehicle_hours_mean": float(vehicle_hours.mean()),
-        "vehicle_hours_std": float(vehicle_hours.std()),
+        "total_vehicle_time_seconds_mean": float(vehicle_time.mean()),
+        "total_vehicle_time_seconds_std": float(vehicle_time.std()),
     }
 
 
@@ -203,11 +211,10 @@ def evaluate_main(argv: Sequence[str] | None = None) -> None:
             args.config,
             DEFAULT_CONFIG_RESOURCE,
         )
-        checkpoint_path, checkpoint_reference = _resolve_asset(
-            stack,
-            args.checkpoint,
-            DEFAULT_CHECKPOINT_RESOURCE,
-        )
+        checkpoint_path = args.checkpoint
+        checkpoint_reference = str(checkpoint_path.resolve())
+        if not checkpoint_path.is_file():
+            parser.error(f"checkpoint does not exist: {checkpoint_path}")
         config = load_config(config_path)
         if args.scenario not in config.scenarios:
             available = ", ".join(sorted(config.scenarios))
@@ -261,45 +268,56 @@ def _run_evaluation(
         train=False,
     )["params"]
     parameters = load_parameters(checkpoint_path, template)
-    initial = sample_initial_states(
+    initial, demand, state_noise = sample_scenario(
         jax.random.PRNGKey(seed),
         args.rollouts,
+        config.objective.horizon,
         config.scenarios[args.scenario],
+        config.demand_profiles,
         config.environment,
+        config.simulation.state_noise_std,
     )
 
     horizon = config.objective.horizon
     dpc_rollout = jax.jit(
-        lambda x: rollout_policy(
+        lambda x, d, noise: rollout_policy(
             parameters,
             policy.apply,
             x,
             config.environment,
             horizon,
+            d,
+            noise,
         )
     )
     (dpc_states, dpc_controls), dpc_runtime = _timed_rollout(
         dpc_rollout,
         initial,
+        demand,
+        state_noise,
         steps=horizon,
         rollouts=args.rollouts,
     )
 
     mppi_key = jax.random.PRNGKey(seed + 10_000)
     mppi_rollout = jax.jit(
-        lambda key, x: rollout_mppi(
+        lambda key, x, d, noise: rollout_mppi(
             key,
             x,
             horizon,
             config.environment,
             config.objective,
             mppi,
+            d,
+            noise,
         )
     )
     (mppi_states, mppi_controls), mppi_runtime = _timed_rollout(
         mppi_rollout,
         mppi_key,
         initial,
+        demand,
+        state_noise,
         steps=horizon,
         rollouts=args.rollouts,
     )
@@ -308,11 +326,21 @@ def _run_evaluation(
         (args.rollouts, horizon, config.environment.control_dim),
         config.environment.u_high,
     )
-    baseline_rollout = jax.jit(lambda x, u: rollout_controls(x, u, config.environment))
+    baseline_rollout = jax.jit(
+        lambda x, u, d, noise: rollout_controls(
+            x,
+            u,
+            config.environment,
+            d,
+            noise,
+        )
+    )
     baseline_states, baseline_runtime = _timed_rollout(
         baseline_rollout,
         initial,
         open_control,
+        demand,
+        state_noise,
         steps=horizon,
         rollouts=args.rollouts,
     )
@@ -338,9 +366,39 @@ def _run_evaluation(
         "scenario": args.scenario,
         "rollouts": args.rollouts,
         "horizon": horizon,
+        "objective": {
+            "name": "L1 total vehicle time",
+            "formula": "dt * sum(k=1..N-1, ||x[k]||_1)",
+            "units": "vehicle-seconds",
+            "shared_by": ["dpc", "mppi"],
+            "reference": "Tumu et al. (2024), Equation (16a)",
+        },
+        "experiment": {
+            "environment_model": "NMFD",
+            "acyclic_plant_model_used": False,
+            "dt_seconds": config.environment.dt,
+            "state_noise_std": config.simulation.state_noise_std,
+            "control_bounds": [
+                config.environment.u_low,
+                config.environment.u_high,
+            ],
+            "fixed_routing": "equal split over shortest-path next hops",
+            "scenario": asdict(config.scenarios[args.scenario]),
+            "demand_profiles": [asdict(profile) for profile in config.demand_profiles],
+        },
+        "dpc_settings": {
+            "formulation": "perimeter control only",
+            "paper": (
+                "Differentiable Predictive Control for Large-Scale Urban Road Networks"
+            ),
+            "arxiv": "2406.10433",
+            "policy": asdict(config.policy),
+            "output_map": "u_low + (u_high - u_low) * sigmoid(raw_control)",
+        },
         "mppi_settings": {
             "formulation": "Williams et al. 2017 information-theoretic MPC",
             "doi": "10.1109/TRO.2018.2865891",
+            "planning_horizon": mppi.planning_horizon,
             "samples": mppi.samples,
             "iterations": mppi.iterations,
             "temperature": mppi.temperature,
@@ -350,11 +408,7 @@ def _run_evaluation(
             "gamma": mppi.temperature * (1.0 - mppi.alpha),
             "smoothing_window": mppi.smoothing_window,
             "smoothing_polynomial": mppi.smoothing_polynomial,
-            "control_weight": config.objective.control_weight,
-            "control_rate_weight": config.objective.control_rate_weight,
-            "uses_nmfd_objective_extensions": bool(
-                config.objective.control_weight or config.objective.control_rate_weight
-            ),
+            "traffic_objective": "shared L1 total vehicle time",
         },
         "controllers": {
             "dpc": {
@@ -423,16 +477,15 @@ def _training_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("checkpoints/dpc_policy_trained.msgpack"),
+        default=Path("checkpoints/dpc_policy.msgpack"),
     )
     parser.add_argument(
         "--scenario",
-        default="in_distribution",
-        help="initial-state scenario used for training",
+        default="nominal",
+        help="traffic scenario used for training",
     )
     parser.add_argument("--epochs", type=_positive_int)
     parser.add_argument("--steps-per-epoch", type=_positive_int)
-    parser.add_argument("--sample-pool-size", type=_positive_int)
     parser.add_argument("--batch-size", type=_positive_int)
     parser.add_argument("--seed", type=int)
     return parser
@@ -473,38 +526,30 @@ def _run_training(
             if args.steps_per_epoch is None
             else args.steps_per_epoch
         ),
-        sample_pool_size=(
-            config.training.sample_pool_size
-            if args.sample_pool_size is None
-            else args.sample_pool_size
-        ),
         batch_size=(
             config.training.batch_size if args.batch_size is None else args.batch_size
         ),
     )
     policy = create_policy(config.policy, config.environment)
     key = jax.random.PRNGKey(seed)
-    key, initialization_key, pool_key = jax.random.split(key, 3)
+    key, initialization_key = jax.random.split(key)
     state = create_train_state(initialization_key, policy, training)
-    pool = sample_initial_states(
-        pool_key,
-        training.sample_pool_size,
-        config.scenarios[args.scenario],
-        config.environment,
-    )
     train_step = make_train_step(config.environment, config.objective)
 
     for epoch in range(1, training.epochs + 1):
         losses = []
         for _ in range(training.steps_per_epoch):
-            key, batch_key = jax.random.split(key)
-            indices = jax.random.randint(
-                batch_key,
-                (training.batch_size,),
-                minval=0,
-                maxval=training.sample_pool_size,
+            key, scenario_key = jax.random.split(key)
+            initial, demand, state_noise = sample_scenario(
+                scenario_key,
+                training.batch_size,
+                config.objective.horizon,
+                config.scenarios[args.scenario],
+                config.demand_profiles,
+                config.environment,
+                config.simulation.state_noise_std,
             )
-            state, metrics = train_step(state, pool[indices])
+            state, metrics = train_step(state, initial, demand, state_noise)
             losses.append(float(metrics["loss"]))
         print(f"epoch {epoch:03d}: loss={np.mean(losses):.6e}")
 
@@ -512,13 +557,51 @@ def _run_training(
         args.output,
         state.params,
         metadata={
-            "epochs": training.epochs,
-            "steps_per_epoch": training.steps_per_epoch,
+            "format_version": 1,
             "seed": seed,
-            "scenario": args.scenario,
+            "paper": {
+                "title": (
+                    "Differentiable Predictive Control for Large-Scale Urban "
+                    "Road Networks"
+                ),
+                "arxiv": "2406.10433",
+            },
+            "policy": {
+                **asdict(config.policy),
+                "controller": "perimeter control only",
+                "output_map": "sigmoid affine to control bounds",
+            },
+            "objective": {
+                "name": "L1 total vehicle time",
+                "formula": "dt * sum(k=1..N-1, ||x[k]||_1)",
+                "horizon": config.objective.horizon,
+            },
+            "environment": {
+                "model": "NMFD",
+                "acyclic_plant_model_used": False,
+                "dt_seconds": config.environment.dt,
+                "n_substeps": config.environment.n_substeps,
+                "control_bounds": [
+                    config.environment.u_low,
+                    config.environment.u_high,
+                ],
+                "routing": "fixed shortest paths",
+            },
+            "simulation": asdict(config.simulation),
+            "scenario": asdict(config.scenarios[args.scenario]),
+            "demand_profiles": [asdict(profile) for profile in config.demand_profiles],
+            "training": {
+                **asdict(training),
+                "completed_updates": training.epochs * training.steps_per_epoch,
+                "optimizer": "AdamW",
+            },
             "source_config": config_reference,
             "source_config_sha256": _sha256(config_path),
-            "nmfd_traffic_env_version": _package_version(),
+            "software": {
+                "nmfd_traffic_env": _package_version(),
+                "python": platform.python_version(),
+                "jax": jax.__version__,
+            },
             "repository_commit": _repository_commit(config_path),
             "repository_dirty": _repository_dirty(config_path),
             "generated_at_utc": datetime.now(UTC).isoformat(),

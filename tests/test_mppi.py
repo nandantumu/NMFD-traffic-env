@@ -13,7 +13,7 @@ from nmfd_traffic import (
     load_config,
     rollout_mppi,
     rollout_naive_mppi,
-    sample_initial_states,
+    sample_scenario,
 )
 from nmfd_traffic.mppi import (
     _normalized_weights,
@@ -31,6 +31,7 @@ CONFIG = Path(__file__).parents[1] / "configs" / "seven_region.toml"
 
 def _mppi_config(**changes) -> MPPIConfig:
     config = MPPIConfig(
+        planning_horizon=2,
         samples=4,
         iterations=1,
         temperature=2.0,
@@ -98,12 +99,7 @@ def test_one_trajectory_weight_updates_every_horizon_position():
 
 def test_plan_update_uses_raw_perturbations_after_bounded_rollouts():
     environment = _stationary_environment()
-    objective = ObjectiveConfig(
-        horizon=2,
-        state_weight=0.0,
-        control_weight=0.0,
-        control_rate_weight=0.0,
-    )
+    objective = ObjectiveConfig(horizon=2)
     config = _mppi_config(
         samples=2,
         alpha=1.0,
@@ -138,14 +134,9 @@ def test_algorithm_1_includes_nominal_and_zero_centered_samples():
     np.testing.assert_allclose(sampled[:, 2:], perturbations[:, 2:])
 
 
-def test_rollout_cost_has_explicit_terminal_cost_and_nmfd_extensions():
+def test_rollout_cost_uses_the_shared_l1_total_vehicle_time_objective():
     environment = _stationary_environment()
-    objective = ObjectiveConfig(
-        horizon=2,
-        state_weight=1.0,
-        control_weight=2.0,
-        control_rate_weight=3.0,
-    )
+    objective = ObjectiveConfig(horizon=2)
     initial_state = jnp.array([[2.0]])
     sampled_inputs = jnp.array([[[[1.2], [-0.2]], [[0.3], [0.6]]]])
 
@@ -156,27 +147,32 @@ def test_rollout_cost_has_explicit_terminal_cost_and_nmfd_extensions():
         objective,
     )
 
-    # Each trajectory pays c(x0) + c(x1) + phi(x2) = 4 + 4 + 4.
-    # Inputs are clamped to [0.2, 0.8] before optional NMFD costs.
-    expected = np.array(
-        [
-            [
-                12.0 + 2.0 * (0.8**2 + 0.2**2) + 3.0 * (0.2 - 0.8) ** 2,
-                12.0 + 2.0 * (0.3**2 + 0.6**2) + 3.0 * (0.6 - 0.3) ** 2,
-            ]
-        ]
+    # With N=2, Equation (16a) includes x[1] only. This stationary system has
+    # one vehicle-time cost of |2| seconds regardless of the sampled control.
+    np.testing.assert_allclose(costs, [[2.0, 2.0]], rtol=1e-6)
+
+
+def test_rollout_cost_propagates_known_demand():
+    environment = _stationary_environment()
+    objective = ObjectiveConfig(horizon=2)
+    initial_state = jnp.array([[0.0]])
+    sampled_inputs = jnp.zeros((1, 2, 2, 1))
+    demand = jnp.ones((1, 2, 1))
+
+    costs = _rollout_costs(
+        initial_state,
+        sampled_inputs,
+        environment,
+        objective,
+        demand,
     )
-    np.testing.assert_allclose(costs, expected, rtol=1e-6)
+
+    np.testing.assert_allclose(costs, [[1.0, 1.0]])
 
 
 def test_trajectory_score_contains_covariance_aware_importance_correction():
     environment = _stationary_environment()
-    objective = ObjectiveConfig(
-        horizon=2,
-        state_weight=0.0,
-        control_weight=0.0,
-        control_rate_weight=0.0,
-    )
+    objective = ObjectiveConfig(horizon=2)
     config = _mppi_config(
         temperature=2.0,
         noise_std=0.5,
@@ -229,17 +225,21 @@ def test_mppi_rollout_shape_bounds_reproducibility_and_legacy_alias():
     objective = replace(config.objective, horizon=3)
     mppi = replace(
         config.mppi,
+        planning_horizon=3,
         samples=4,
         iterations=1,
         alpha=0.25,
         smoothing_window=3,
         smoothing_polynomial=2,
     )
-    initial = sample_initial_states(
+    initial, demand, state_noise = sample_scenario(
         jax.random.PRNGKey(0),
         2,
-        config.scenarios["in_distribution"],
+        2,
+        config.scenarios["nominal"],
+        config.demand_profiles,
         config.environment,
+        config.simulation.state_noise_std,
     )
     key = jax.random.PRNGKey(1)
     first_states, first_controls = jax.jit(
@@ -250,6 +250,8 @@ def test_mppi_rollout_shape_bounds_reproducibility_and_legacy_alias():
             config.environment,
             objective,
             mppi,
+            demand,
+            state_noise,
         )
     )()
     second_states, second_controls = rollout_mppi(
@@ -259,6 +261,8 @@ def test_mppi_rollout_shape_bounds_reproducibility_and_legacy_alias():
         config.environment,
         objective,
         mppi,
+        demand,
+        state_noise,
     )
     alias_states, alias_controls = rollout_naive_mppi(
         key,
@@ -267,6 +271,8 @@ def test_mppi_rollout_shape_bounds_reproducibility_and_legacy_alias():
         config.environment,
         objective,
         mppi,
+        demand,
+        state_noise,
     )
 
     assert first_states.shape == (2, 3, config.environment.state_dim)
@@ -282,11 +288,11 @@ def test_mppi_rollout_shape_bounds_reproducibility_and_legacy_alias():
 def test_initial_plan_is_fully_open():
     config = load_config(CONFIG)
 
-    plan = initial_control_plan(2, config.environment, config.objective)
+    plan = initial_control_plan(2, config.environment, config.mppi)
 
     assert plan.shape == (
         2,
-        config.objective.horizon,
+        config.mppi.planning_horizon,
         config.environment.control_dim,
     )
     np.testing.assert_allclose(plan, config.environment.u_high)
@@ -294,12 +300,7 @@ def test_initial_plan_is_fully_open():
 
 def test_mppi_rollout_can_be_transformed_with_vmap():
     environment = _stationary_environment()
-    objective = ObjectiveConfig(
-        horizon=2,
-        state_weight=1.0,
-        control_weight=0.0,
-        control_rate_weight=0.0,
-    )
+    objective = ObjectiveConfig(horizon=2)
     config = _mppi_config(
         samples=2,
         alpha=0.5,

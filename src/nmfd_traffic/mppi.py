@@ -11,18 +11,19 @@ import jax
 import jax.numpy as jnp
 
 from .config import MPPIConfig, NMFDParameters, ObjectiveConfig
-from .dynamics import step
+from .dynamics import step, step_with_noise
+from .objective import total_vehicle_time
 
 
 def initial_control_plan(
     batch_size: int,
     environment: NMFDParameters,
-    objective: ObjectiveConfig,
+    config: MPPIConfig,
 ) -> jax.Array:
     """Create the fully-open warm start used by the MPPI controller."""
 
     return jnp.full(
-        (batch_size, objective.horizon, environment.control_dim),
+        (batch_size, config.planning_horizon, environment.control_dim),
         environment.u_high,
         dtype=jnp.float32,
     )
@@ -55,13 +56,12 @@ def _rollout_costs(
     sampled_inputs: jax.Array,
     environment: NMFDParameters,
     objective: ObjectiveConfig,
+    demand: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate S(V; x0) for every complete sampled trajectory.
 
-    State costs are evaluated at x[0] through x[T - 1] and the same quadratic
-    is used explicitly as phi(x[T]). Optional control and control-rate costs
-    are NMFD-specific extensions, not replacements for the MPPI
-    importance-sampling correction.
+    This calls the same L1 total-vehicle-time objective as DPC. The separate
+    importance-sampling correction is added later by ``_trajectory_scores``.
     """
 
     batch_size, samples, horizon, _ = sampled_inputs.shape
@@ -80,36 +80,36 @@ def _rollout_costs(
         horizon,
         environment.control_dim,
     )
+    if demand is None:
+        demand = jnp.zeros(
+            (batch_size, horizon, environment.state_dim),
+            dtype=initial_state.dtype,
+        )
+    expected_demand_shape = (batch_size, horizon, environment.state_dim)
+    if demand.shape != expected_demand_shape:
+        raise ValueError(f"demand must have shape {expected_demand_shape}")
+    flat_demand = jnp.broadcast_to(
+        demand[:, None, :, :],
+        (batch_size, samples, horizon, environment.state_dim),
+    ).reshape(batch_size * samples, horizon, environment.state_dim)
 
-    def rollout_step(current_state: jax.Array, control: jax.Array):
-        stage_cost = objective.state_weight * jnp.sum(current_state**2, axis=-1)
-        next_state = step(current_state, control, environment)
-        return next_state, stage_cost
+    def rollout_step(current_state: jax.Array, inputs: tuple[jax.Array, ...]):
+        control, current_demand = inputs
+        next_state = step(current_state, control, environment, current_demand)
+        return next_state, next_state
 
-    final_state, state_costs = jax.lax.scan(
+    _, states = jax.lax.scan(
         rollout_step,
         state,
-        jnp.swapaxes(flat_controls, 0, 1),
+        (
+            jnp.swapaxes(flat_controls, 0, 1),
+            jnp.swapaxes(flat_demand, 0, 1),
+        ),
     )
-    state_cost = jnp.sum(state_costs, axis=0)
-    terminal_cost = objective.state_weight * jnp.sum(final_state**2, axis=-1)
-
-    control_cost = objective.control_weight * jnp.sum(
-        applied_controls**2,
-        axis=(-2, -1),
-    )
-    control_differences = applied_controls[:, :, 1:, :] - applied_controls[:, :, :-1, :]
-    rate_cost = objective.control_rate_weight * jnp.sum(
-        control_differences**2,
-        axis=(-2, -1),
-    )
-
-    return (
-        state_cost.reshape(batch_size, samples)
-        + terminal_cost.reshape(batch_size, samples)
-        + control_cost
-        + rate_cost
-    )
+    states = jnp.swapaxes(states, 0, 1)
+    trajectory = jnp.concatenate([state[:, None, :], states], axis=1)
+    costs = total_vehicle_time(trajectory, environment.dt)
+    return costs.reshape(batch_size, samples)
 
 
 def _trajectory_scores(
@@ -119,6 +119,7 @@ def _trajectory_scores(
     environment: NMFDParameters,
     objective: ObjectiveConfig,
     config: MPPIConfig,
+    demand: jax.Array | None = None,
 ) -> jax.Array:
     """Add the 2017 paper's importance-sampling correction to rollout costs."""
 
@@ -127,6 +128,7 @@ def _trajectory_scores(
         sampled_inputs,
         environment,
         objective,
+        demand,
     )
     inverse_variance = 1.0 / config.noise_std**2
     gamma = config.temperature * (1.0 - config.alpha)
@@ -195,6 +197,7 @@ def _update_control_plan_from_perturbations(
     environment: NMFDParameters,
     objective: ObjectiveConfig,
     config: MPPIConfig,
+    demand: jax.Array | None = None,
 ) -> jax.Array:
     """Perform one deterministic MPPI update from supplied Gaussian samples."""
 
@@ -210,6 +213,7 @@ def _update_control_plan_from_perturbations(
         environment,
         objective,
         config,
+        demand,
     )
     weights = _normalized_weights(scores, config)
     raw_update = _weighted_perturbation_update(weights, perturbations)
@@ -223,6 +227,7 @@ def update_control_plan(
     environment: NMFDParameters,
     objective: ObjectiveConfig,
     config: MPPIConfig,
+    demand: jax.Array | None = None,
 ) -> jax.Array:
     """Perform one paper-aligned sampled update of a batched control plan."""
 
@@ -231,7 +236,7 @@ def update_control_plan(
         (
             state.shape[0],
             config.samples,
-            objective.horizon,
+            config.planning_horizon,
             environment.control_dim,
         ),
         dtype=state.dtype,
@@ -243,6 +248,7 @@ def update_control_plan(
         environment,
         objective,
         config,
+        demand,
     )
 
 
@@ -253,6 +259,7 @@ def select_action(
     environment: NMFDParameters,
     objective: ObjectiveConfig,
     config: MPPIConfig,
+    demand: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Refine a warm-start plan and return its admissible first action."""
 
@@ -266,6 +273,7 @@ def select_action(
             environment,
             objective,
             config,
+            demand,
         ), None
 
     refined_plan, _ = jax.lax.scan(body, control_plan, iteration_keys)
@@ -284,14 +292,38 @@ def rollout_mppi(
     environment: NMFDParameters,
     objective: ObjectiveConfig,
     config: MPPIConfig,
+    demand: jax.Array | None = None,
+    state_noise: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Run receding-horizon 2017 information-theoretic MPPI."""
+    """Run receding-horizon MPPI with known demand and noisy plant states."""
 
     step_keys = jax.random.split(key, steps)
-    plan = initial_control_plan(initial_state.shape[0], environment, objective)
+    plan = initial_control_plan(initial_state.shape[0], environment, config)
+    batch_size = initial_state.shape[0]
+    expected_shape = (batch_size, steps, environment.state_dim)
+    if demand is None:
+        demand = jnp.zeros(expected_shape, dtype=initial_state.dtype)
+    if state_noise is None:
+        state_noise = jnp.zeros(expected_shape, dtype=initial_state.dtype)
+    if demand.shape != expected_shape:
+        raise ValueError(f"demand must have shape {expected_shape}")
+    if state_noise.shape != expected_shape:
+        raise ValueError(f"state_noise must have shape {expected_shape}")
+    demand_padding = jnp.zeros(
+        (batch_size, config.planning_horizon - 1, environment.state_dim),
+        dtype=demand.dtype,
+    )
+    padded_demand = jnp.concatenate([demand, demand_padding], axis=1)
 
-    def body(carry, step_key: jax.Array):
+    def body(carry, inputs: tuple[jax.Array, ...]):
         state, current_plan = carry
+        time_index, step_key, current_demand, current_noise = inputs
+        forecast_demand = jax.lax.dynamic_slice_in_dim(
+            padded_demand,
+            time_index,
+            config.planning_horizon,
+            axis=1,
+        )
         control, refined_plan = select_action(
             step_key,
             state,
@@ -299,8 +331,15 @@ def rollout_mppi(
             environment,
             objective,
             config,
+            forecast_demand,
         )
-        next_state = step(state, control, environment)
+        next_state = step_with_noise(
+            state,
+            control,
+            environment,
+            current_demand,
+            current_noise,
+        )
         terminal_control = jnp.full_like(refined_plan[:, :1, :], environment.u_high)
         warm_start = jnp.concatenate(
             [refined_plan[:, 1:, :], terminal_control],
@@ -311,7 +350,12 @@ def rollout_mppi(
     _, (states, controls) = jax.lax.scan(
         body,
         (initial_state, plan),
-        step_keys,
+        (
+            jnp.arange(steps),
+            step_keys,
+            jnp.swapaxes(demand, 0, 1),
+            jnp.swapaxes(state_noise, 0, 1),
+        ),
     )
     states = jnp.swapaxes(states, 0, 1)
     controls = jnp.swapaxes(controls, 0, 1)
@@ -326,6 +370,8 @@ def rollout_naive_mppi(
     environment: NMFDParameters,
     objective: ObjectiveConfig,
     config: MPPIConfig,
+    demand: jax.Array | None = None,
+    state_noise: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Backward-compatible name for rollout_mppi."""
 
@@ -336,4 +382,6 @@ def rollout_naive_mppi(
         environment,
         objective,
         config,
+        demand,
+        state_noise,
     )

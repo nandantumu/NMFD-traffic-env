@@ -1,31 +1,30 @@
-# NMFD Traffic Environment
+# NMFD traffic control environment
 
-A compact JAX environment for regional traffic control with a Networked
-Macroscopic Fundamental Diagram (NMFD), with a deterministic Differentiable
-Predictive Control (DPC) policy and a horizon-based MPPI controller.
+A compact, educational JAX implementation of a seven-region Networked
+Macroscopic Fundamental Diagram (NMFD), a perimeter-control-only
+Differentiable Predictive Control (DPC) policy, and information-theoretic MPPI.
 
-This repository was extracted from the urban-traffic example in `L2O_MPPI`.
-It intentionally excludes the vehicle and quadruped examples, PyTorch training
-paths, learned MPPI variants, experiment tracking, and F1TENTH dependencies.
+The DPC experiment targets [Tumu et al. (2024)][dpc-paper]. The MPPI controller
+targets Algorithms 1 and 2 of [Williams et al. (2017)][mppi-paper]. Both
+controllers optimize one shared L1 total-vehicle-time objective.
 
-## Included
+## What is included
 
-- Batched, differentiable NMFD dynamics in JAX.
-- Optional exogenous origin-destination demand.
-- Fourth-order Runge--Kutta integration with configurable substeps.
-- Shortest-path routing generated from an adjacency matrix.
-- Reproducible in-distribution and out-of-distribution initial-state scenarios.
-- A bounded deterministic Flax MLP trained end-to-end through the dynamics.
-- A receding-horizon MPPI controller implementing the 2017 information-theoretic
-  formulation, with configurable sampling, recovery trajectories, and
-  Savitzky–Golay smoothing.
-- An inference-only checkpoint for the original seven-region DPC policy.
-- Reusable total-accumulation, per-region, control-heatmap, and topology plots.
-- Focused tests and small command-line entry points.
+- Batched NMFD dynamics with optional time-varying OD demand.
+- Fourth-order Runge--Kutta integration in a functional JAX API.
+- Fixed routing generated from equal-weight shortest-path next hops.
+- A perimeter-control policy with three 128-neuron `tanh` hidden layers.
+- The paper's sigmoid-affine output map, which enforces controls in
+  `[0.1, 0.9]` by construction.
+- Offline DPC training through the closed-loop NMFD rollout.
+- Receding-horizon 2017 information-theoretic MPPI.
+- Reproducible nominal and noisy-demand scenarios.
+- Hash-bound checkpoint provenance and detailed evaluation reports.
+- Ruff, branch-coverage tests, wheel checks, and GitHub Actions CI.
 
-The direct runtime dependencies are JAX, Flax, NumPy, Optax, and Matplotlib.
+The runtime remains JAX-only. PyTorch and Gym are not dependencies.
 
-## Setup with uv
+## Setup
 
 ```bash
 git clone <repository-url> NMFD-traffic-env
@@ -34,76 +33,122 @@ uv sync
 uv run pytest
 ```
 
-The locked environment uses CPU-compatible JAX by default. Install the JAX
-accelerator build appropriate for your platform separately if GPU execution is
-needed.
+The lock file selects CPU-compatible JAX. Install the JAX accelerator build
+appropriate for your platform separately when GPU execution is needed.
 
-## Compare DPC and MPPI
+## Train the PC-only DPC policy
 
-Evaluate 100 matched rollouts from the training distribution:
-
-```bash
-uv run nmfd-evaluate --scenario in_distribution
-```
-
-Evaluate the shifted congestion distribution:
-
-```bash
-uv run nmfd-evaluate --scenario out_of_distribution
-```
-
-Each command evaluates DPC, MPPI, and a constant open-gates reference on
-the same initial states. It writes a metrics JSON file and four plots under
-`results/`:
-
-- total network accumulation with mean and one-standard-deviation bands;
-- per-region accumulation;
-- mean DPC and MPPI control heatmaps;
-- the region-network topology.
-
-The report records the seed, generation time, package and JAX versions,
-repository commit and dirty-worktree status when available, and the sources and
-SHA-256 hashes of the configuration and checkpoint. The command-line defaults
-are packaged with the library, so `nmfd-evaluate` also works outside a source
-checkout. Pass `--config` or `--checkpoint` to use another experiment.
-
-For a faster exploratory run, reduce the number of rollouts and MPPI samples:
-
-```bash
-uv run nmfd-evaluate \
-  --scenario in_distribution \
-  --rollouts 10 \
-  --mppi-samples 32 \
-  --output-dir results/quick
-```
-
-Use `--no-plots` when only the JSON metrics are needed. Example plots generated
-with the checked-in configuration are available under `figures/`.
-
-Or run the minimal Python example:
-
-```bash
-uv run python examples/quickstart.py
-```
-
-## Train a policy
-
-The checked-in configuration retains the original training settings. A short
-smoke run can be launched with:
+No pretrained checkpoint is included: the previous checkpoint used a different
+policy, objective, scenario, and numerical configuration and was intentionally
+removed. A smoke run is:
 
 ```bash
 uv run nmfd-train \
   --epochs 1 \
-  --steps-per-epoch 5 \
-  --sample-pool-size 2048 \
-  --batch-size 32
+  --steps-per-epoch 1 \
+  --batch-size 4
 ```
 
-This writes `checkpoints/dpc_policy_trained.msgpack`. A full reproduction uses:
+The default command runs the configuration's 1,000 optimizer updates:
 
 ```bash
 uv run nmfd-train
 ```
+
+Both commands write `checkpoints/dpc_policy.msgpack` and a
+`checkpoints/dpc_policy.json` provenance sidecar. The sidecar records the
+artifact hash and size, seed, policy architecture, objective, scenario, demand
+profiles, optimizer settings, software versions, source configuration hash,
+and repository state. Generated checkpoints are ignored by Git.
+
+The paper reports Adam with learning rate `1e-4`, weight decay `1e-6`, and
+batch size 256, but does not report a training-update count. The checked-in
+1,000-update default is therefore a repository choice, not a claimed paper
+hyperparameter.
+
+## Compare DPC and MPPI
+
+Pass the checkpoint explicitly so an incompatible or undocumented policy cannot
+be selected silently:
+
+```bash
+uv run nmfd-evaluate \
+  --checkpoint checkpoints/dpc_policy.msgpack \
+  --scenario nominal
+```
+
+For the representative demand-shift case:
+
+```bash
+uv run nmfd-evaluate \
+  --checkpoint checkpoints/dpc_policy.msgpack \
+  --scenario noisy_demand
+```
+
+Evaluation matches the initial states, demand trajectories, and state-noise
+realizations across DPC, MPPI, and the open-gates baseline. It writes a metrics
+JSON file and, unless `--no-plots` is set, plots under `results/`. Reports
+contain the random seed, software/Git provenance, asset hashes, policy and MPPI
+settings, demand/noise configuration, shared objective, performance metrics,
+and runtime.
+
+For a quick comparison:
+
+```bash
+uv run nmfd-evaluate \
+  --checkpoint checkpoints/dpc_policy.msgpack \
+  --rollouts 2 \
+  --mppi-samples 8 \
+  --no-plots
+```
+
+## Paper-target experiment
+
+The default configuration uses the paper's stated seven-region settings:
+
+| Setting | Value |
+| --- | --- |
+| NMFD coefficients | `a=4.133e-11`, `b=-8.282e-7`, `c=0.0042` |
+| Control interval | 30 s |
+| Experiment/training horizon | 240 steps |
+| MPPI receding planning horizon | 8 steps |
+| Control bounds | `[0.1, 0.9]` |
+| State/measurement noise standard deviation | 0.25 |
+| Initial state | zero vehicles |
+| Routing | fixed shortest paths |
+| DPC hidden width | 128 |
+| DPC architecture selected here | three hidden layers, `tanh` |
+| Batch size | 256 |
+| Learning rate / weight decay | `1e-4` / `1e-6` |
+
+The demand scenario contains the five paper OD flows: both directions between
+regions 0 and 6, both directions between regions 5 and 1, and region 4 to
+region 2. Figure 4 of the paper plots these values but does not publish a
+numeric table. The checked-in piecewise-linear profiles are explicitly
+documented approximations of that figure; they should not be described as the
+authors' exact samples.
+
+As requested, training and evaluation both use this NMFD model. The paper's
+separate acyclic evaluation plant is not implemented. There is also no routing
+guidance decoder: the implementation is perimeter control only.
+
+See [the DPC implementation note](docs/dpc.md) for the full mapping and
+intentional deviations, and [the MPPI implementation note](docs/mppi.md) for
+the sampling-controller equations.
+
+## Shared controller objective
+
+For a complete trajectory `[x[0], ..., x[N]]`, both controllers use
+
+```text
+J = dt * sum(k=1..N-1, ||x[k]||_1).
+```
+
+This is Equation (16a) of the traffic DPC paper, expressed in
+vehicle-seconds. The shared implementation is
+`src/nmfd_traffic/objective.py`. MPPI still adds the 2017
+importance-sampling correction to its sampled-trajectory score; that correction
+is part of the MPPI estimator, not a different traffic objective.
 
 ## Python API
 
@@ -117,107 +162,37 @@ from nmfd_traffic import load_config, step
 
 config = load_config(Path("configs/seven_region.toml"))
 params = config.environment
-
-state = jnp.full((1, params.state_dim), 100.0)
+state = jnp.zeros((1, params.state_dim))
 control = jnp.full((1, params.control_dim), params.u_high)
-next_state = jax.jit(lambda x, u: step(x, u, params))(state, control)
+demand = jnp.zeros_like(state).at[0, 6].set(5.0)
+
+next_state = jax.jit(lambda x, u, d: step(x, u, params, d))(
+    state,
+    control,
+    demand,
+)
 ```
 
-State and demand tensors use flattened row-major `(current region, final
-destination)` matrices. Thus `x[i, j]` is the number of vehicles currently in
-region `i` whose final destination is region `j`. A vehicle retains column `j`
-as it moves between rows on its route.
+State and demand tensors flatten a row-major
+`(current region, final destination)` matrix. Control tensors flatten a
+`(sending region, receiving region)` matrix. All have final dimension
+`num_regions**2`; leading batch dimensions are supported.
 
-Control tensors instead use flattened row-major `(sending region, receiving
-region)` matrices: `u[i, h]` gates transfer from region `i` to adjacent next-hop
-region `h`. For `R` regions, state, demand, and control all have final dimension
-`R**2`. Only off-diagonal controls on adjacency edges affect the dynamics; the
-complete square control shape makes reshaping and batching straightforward.
-
-## Model
-
-For accumulation `x_ij` currently in region `i` with final destination `j`,
-total regional accumulation and production are
+For accumulation `x_ij`, regional production is
 
 ```text
 x_i      = sum_j x_ij
 g_i(x_i) = a_i x_i^3 + b_i x_i^2 + c_i x_i.
 ```
 
-Shortest-path routing fractions `theta_ihj` define transfer flow
+Shortest-path routing fractions `theta_ihj` determine transfers, while
+`u_ih` gates flow across adjacent region boundaries. Production is evaluated
+at the actual regional accumulation and is not clipped or saturated. Integrated
+states are clipped only at zero to prevent negative vehicle counts.
 
-```text
-m_ihj = theta_ihj (x_ij / x_i) g_i(x_i),
-```
+## Development
 
-while `m_ii = (x_ii / x_i) g_i(x_i)` completes trips already in their
-destination region. Perimeter controls multiply transfer flows between adjacent
-regions. See `src/nmfd_traffic/dynamics.py` for the vectorized equations.
-
-The production polynomial is evaluated at the actual regional accumulation;
-it is not silently clipped or saturated. `step` does clip the integrated state
-at zero after every RK4 substep to enforce nonnegative vehicle counts. When
-using a polynomial outside its calibrated range, the caller is responsible for
-checking that the resulting production remains physically meaningful.
-
-The default configuration has seven regions, 49 state components, a 120-second
-control interval, four RK4 substeps, and a 40-step horizon. The DPC policy is a
-five-layer, 512-unit GELU MLP with bounded outputs in `[0.2, 0.8]`.
-
-At every control step, MPPI samples full 40-step perturbation sequences. Most
-are centered on the warm-start plan and a configurable fraction are centered at
-zero for recovery. It rolls the sequences through the same NMFD dynamics,
-computes one importance-sampling-corrected score and weight per complete
-trajectory, and updates the plan with the weighted raw perturbations. A
-Savitzky–Golay filter smooths the update. The controller executes the first
-bounded action, shifts the optimized plan, and repeats. The default uses 128
-samples and one update iteration.
-
-The implementation follows the 2017 information-theoretic controller of
-Williams et al. (published in *IEEE Transactions on Robotics* in 2018), using
-Algorithms 1 and 2 as the normative specification. In particular, the controller
-uses one importance-sampling-corrected cost and one weight per complete sampled
-trajectory, a fixed inverse temperature, raw Gaussian perturbations in the
-control update, an explicit terminal cost, and bounded inputs in the rollout
-dynamics without truncating the perturbations used by the mean update. See
-[the MPPI implementation note](docs/mppi.md) for the equations, the distinction
-from the 2015 formulation, NMFD-specific extensions, and verification tests.
-
-The controller implementation is in `src/nmfd_traffic/mppi.py`; plotting is in
-`src/nmfd_traffic/visualization.py`. Both are functional and compatible with
-`jax.jit` where applicable.
-
-## Scenarios
-
-`configs/seven_region.toml` defines:
-
-- `in_distribution`: ordinary OD cells use `Normal(150, 20)`; cells `(1,5)`,
-  `(0,6)`, `(5,0)`, and `(6,1)` use `Normal(4000, 100)`.
-- `out_of_distribution`: ordinary cells shift to `Normal(200, 40)` and the
-  same four hotspots shift to `Normal(5000, 200)`.
-
-Training and evaluation are zero-demand stabilization tasks. The public
-`dynamics` and `step` functions nevertheless accept an optional demand tensor
-so the environment can also represent continuing arrivals.
-
-Scenario names are not hardcoded into the evaluator. Add another table under
-`[scenarios.<name>]` and select it with `--scenario <name>`. Training also
-accepts `--scenario`; its default remains `in_distribution`.
-
-## Checkpoint format
-
-`checkpoints/dpc_policy.msgpack` contains only Flax inference parameters—no
-optimizer state and no executable pickle payload. Initialize the configured
-policy to obtain a matching parameter template, then call `load_parameters`.
-Its source commit, source and artifact hashes, training step, and exact
-conversion are recorded in `checkpoints/dpc_policy.provenance.json` and
-`checkpoints/README.md`.
-
-## Development quality checks
-
-The repository uses Ruff for linting and formatting, pytest with branch
-coverage, and a two-version GitHub Actions matrix. Run the complete local check
-set with:
+Run the same checks as CI:
 
 ```bash
 uv sync --locked --all-groups
@@ -227,9 +202,12 @@ uv run pytest --cov=nmfd_traffic --cov-report=term-missing
 uv build --wheel
 ```
 
-See `CONTRIBUTING.md` for the project’s readability, testing, documentation,
+See [CONTRIBUTING.md](CONTRIBUTING.md) for readability, testing, documentation,
 and JAX transformation expectations.
 
 ## License
 
-This project is available under the MIT License. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).
+
+[dpc-paper]: https://arxiv.org/abs/2406.10433
+[mppi-paper]: https://arxiv.org/abs/1707.02342

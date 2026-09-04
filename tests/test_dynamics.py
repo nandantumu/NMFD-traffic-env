@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from nmfd_traffic import dynamics, load_config, step
+from nmfd_traffic import dynamics, load_config, rollout_controls, step, step_with_noise
 
 CONFIG = Path(__file__).parents[1] / "configs" / "seven_region.toml"
 
@@ -109,3 +109,35 @@ def test_step_matches_vmap_and_propagates_demand():
     without_demand = step(zero_state, controls[:1], params)
     with_demand = jax.jit(lambda x: step(x, controls[:1], params, demand))(zero_state)
     assert float(with_demand.sum()) > float(without_demand.sum())
+
+
+def test_state_noise_is_added_after_the_nmfd_step_and_clipped_at_zero():
+    params = load_config(CONFIG).environment
+    state = jnp.zeros((1, params.state_dim))
+    control = jnp.full_like(state, params.u_high)
+    noise = jnp.zeros_like(state).at[0, 0].set(-1.0).at[0, 1].set(2.0)
+
+    next_state = step_with_noise(state, control, params, state_noise=noise)
+
+    assert next_state[0, 0] == 0.0
+    assert next_state[0, 1] == 2.0
+
+
+def test_control_rollout_propagates_time_varying_demand_and_noise():
+    params = load_config(CONFIG).environment
+    initial = jnp.zeros((1, params.state_dim))
+    controls = jnp.full((1, 2, params.control_dim), params.u_high)
+    demand = jnp.zeros((1, 2, params.state_dim)).at[0, :, 1].set(0.1)
+    noise = jnp.zeros_like(demand).at[0, 1, 2].set(1.0)
+
+    states = jax.jit(rollout_controls, static_argnums=())(
+        initial,
+        controls,
+        params,
+        demand,
+        noise,
+    )
+
+    assert states.shape == (1, 3, params.state_dim)
+    assert states[0, 1, 1] > 0.0
+    assert states[0, 2, 2] >= 1.0

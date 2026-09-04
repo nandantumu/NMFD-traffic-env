@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -10,14 +11,22 @@ from flax import serialization
 def save_parameters(
     path: str | Path, parameters: Any, metadata: dict | None = None
 ) -> None:
-    """Save inference parameters as Flax msgpack, without optimizer state."""
+    """Save inference parameters and a hash-bound provenance sidecar."""
 
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(serialization.to_bytes(parameters))
+    payload = serialization.to_bytes(parameters)
+    output.write_bytes(payload)
     if metadata is not None:
+        provenance = dict(metadata)
+        provenance["artifact"] = {
+            "format": "Flax serialization.to_bytes parameter tree",
+            "path": output.name,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size_bytes": len(payload),
+        }
         output.with_suffix(".json").write_text(
-            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+            json.dumps(provenance, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
 

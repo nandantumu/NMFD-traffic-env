@@ -31,35 +31,21 @@ def test_checkpoint_round_trip_and_metadata(tmp_path):
         restored["dense"]["kernel"],
         parameters["dense"]["kernel"],
     )
-    assert json.loads(output.with_suffix(".json").read_text()) == {
-        "seed": 4,
-        "source": "test",
+    metadata = json.loads(output.with_suffix(".json").read_text())
+    assert metadata["seed"] == 4
+    assert metadata["source"] == "test"
+    assert metadata["artifact"] == {
+        "format": "Flax serialization.to_bytes parameter tree",
+        "path": "parameters.msgpack",
+        "sha256": _sha256(output),
+        "size_bytes": output.stat().st_size,
     }
 
 
-def test_packaged_assets_match_the_repository_copies():
+def test_packaged_configuration_matches_the_repository_copy():
     package = resources.files("nmfd_traffic").joinpath("data")
-    pairs = [
-        (package.joinpath("seven_region.toml"), ROOT / "configs/seven_region.toml"),
-        (
-            package.joinpath("dpc_policy.msgpack"),
-            ROOT / "checkpoints/dpc_policy.msgpack",
-        ),
-        (
-            package.joinpath("dpc_policy.provenance.json"),
-            ROOT / "checkpoints/dpc_policy.provenance.json",
-        ),
-    ]
+    packaged = package.joinpath("seven_region.toml")
+    repository = ROOT / "configs/seven_region.toml"
 
-    for packaged, repository in pairs:
-        with resources.as_file(packaged) as packaged_path:
-            assert _sha256(packaged_path) == _sha256(repository)
-
-
-def test_checked_in_checkpoint_matches_its_provenance_record():
-    provenance_path = ROOT / "checkpoints/dpc_policy.provenance.json"
-    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
-    checkpoint = ROOT / provenance["artifact"]["path"]
-
-    assert checkpoint.stat().st_size == provenance["artifact"]["size_bytes"]
-    assert _sha256(checkpoint) == provenance["artifact"]["sha256"]
+    with resources.as_file(packaged) as packaged_path:
+        assert _sha256(packaged_path) == _sha256(repository)

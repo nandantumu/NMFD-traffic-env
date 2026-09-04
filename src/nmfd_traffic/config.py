@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import itertools
 import math
 import tomllib
 from dataclasses import dataclass
@@ -38,17 +39,14 @@ class NMFDParameters:
 
 @dataclass(frozen=True)
 class ObjectiveConfig:
-    """Finite-horizon controller objective and its nonnegative weights."""
+    """Horizon for the shared total-vehicle-time controller objective."""
 
     horizon: int
-    state_weight: float
-    control_weight: float
-    control_rate_weight: float
 
 
 @dataclass(frozen=True)
 class PolicyConfig:
-    """Architecture of the deterministic DPC multilayer perceptron."""
+    """Architecture of the perimeter-control DPC multilayer perceptron."""
 
     hidden_dim: int
     num_hidden_layers: int
@@ -66,6 +64,7 @@ class MPPIConfig:
     The final two fields define the JAX-native Savitzky--Golay update filter.
     """
 
+    planning_horizon: int
     samples: int
     iterations: int
     temperature: float
@@ -77,40 +76,41 @@ class MPPIConfig:
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    """Optimization and initial-state sampling settings for DPC training."""
+    """Optimization settings for offline DPC policy training."""
 
-    sample_pool_size: int
     epochs: int
     steps_per_epoch: int
     batch_size: int
     learning_rate: float
     weight_decay: float
-    gradient_clip: float
 
 
 @dataclass(frozen=True)
-class CellOverride:
-    """Distribution override for one ``(current region, destination)`` cell."""
+class SimulationConfig:
+    """Stochastic disturbance settings shared by training and evaluation."""
 
-    row: int
-    column: int
-    mean: float
-    std: float
-    min_value: float
-    max_value: float
+    state_noise_std: float
 
 
 @dataclass(frozen=True)
-class InitialStateScenario:
-    """Clipped normal distribution used to sample initial traffic states."""
+class DemandProfile:
+    """Piecewise-linear arrival-rate profile for one origin-destination pair."""
 
     name: str
-    distribution: str
-    mean: float
-    std: float
-    min_value: float
-    max_value: float
-    overrides: tuple[CellOverride, ...] = ()
+    origin: int
+    destination: int
+    times: tuple[float, ...]
+    rates: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class TrafficScenario:
+    """Initial condition and demand perturbation for a traffic experiment."""
+
+    name: str
+    initial_state: float
+    demand_scale: float
+    demand_noise_std: float
 
 
 @dataclass(frozen=True)
@@ -123,7 +123,9 @@ class ExperimentConfig:
     policy: PolicyConfig
     mppi: MPPIConfig
     training: TrainingConfig
-    scenarios: dict[str, InitialStateScenario]
+    simulation: SimulationConfig
+    demand_profiles: tuple[DemandProfile, ...]
+    scenarios: dict[str, TrafficScenario]
 
     @property
     def naive_mppi(self) -> MPPIConfig:
@@ -174,67 +176,48 @@ def build_shortest_path_routing(adjacency: np.ndarray) -> np.ndarray:
     return theta
 
 
-def _scenario_from_mapping(
-    name: str, raw: dict[str, Any], regions: int
-) -> InitialStateScenario:
-    distribution = str(raw.get("distribution", "normal")).lower()
-    if distribution != "normal":
-        raise ValueError(
-            f"scenario {name!r}: only normal sampling is currently supported"
-        )
+def _demand_profile_from_mapping(raw: dict[str, Any], regions: int) -> DemandProfile:
+    name = str(raw["name"])
+    origin = int(raw["origin"])
+    destination = int(raw["destination"])
+    times = tuple(float(value) for value in raw["times"])
+    rates = tuple(float(value) for value in raw["rates"])
 
-    lower = float(raw.get("min_value", 0.0))
-    upper = float(raw["max_value"])
-    mean = float(raw["mean"])
-    std = float(raw["std"])
-    if not all(math.isfinite(value) for value in (lower, upper, mean, std)):
-        raise ValueError(f"scenario {name!r}: distribution values must be finite")
-    if std < 0.0:
-        raise ValueError(f"scenario {name!r}: std must be nonnegative")
-    if lower > upper:
-        raise ValueError(f"scenario {name!r}: min_value must not exceed max_value")
-    overrides = []
-    for item in raw.get("overrides", []):
-        row = int(item["row"])
-        column = int(item["column"])
-        if not (0 <= row < regions and 0 <= column < regions):
-            raise ValueError(
-                f"scenario {name!r}: override ({row}, {column}) is out of range"
-            )
-        override = CellOverride(
-            row=row,
-            column=column,
-            mean=float(item.get("mean", mean)),
-            std=float(item.get("std", std)),
-            min_value=float(item.get("min_value", lower)),
-            max_value=float(item.get("max_value", upper)),
+    if not (0 <= origin < regions and 0 <= destination < regions):
+        raise ValueError(f"demand profile {name!r}: origin or destination is invalid")
+    if origin == destination:
+        raise ValueError(f"demand profile {name!r}: origin and destination must differ")
+    if len(times) != len(rates) or len(times) < 2:
+        raise ValueError(
+            f"demand profile {name!r}: times and rates need equal lengths of at "
+            "least two"
         )
-        if not all(
-            math.isfinite(value)
-            for value in (
-                override.mean,
-                override.std,
-                override.min_value,
-                override.max_value,
-            )
-        ):
-            raise ValueError(f"scenario {name!r}: override values must be finite")
-        if override.std < 0.0:
-            raise ValueError(f"scenario {name!r}: override std must be nonnegative")
-        if override.min_value > override.max_value:
-            raise ValueError(
-                f"scenario {name!r}: override min_value must not exceed max_value"
-            )
-        overrides.append(override)
-    return InitialStateScenario(
+    if not all(math.isfinite(value) for value in (*times, *rates)):
+        raise ValueError(f"demand profile {name!r}: values must be finite")
+    if any(later <= earlier for earlier, later in itertools.pairwise(times)):
+        raise ValueError(f"demand profile {name!r}: times must be strictly increasing")
+    if any(rate < 0.0 for rate in rates):
+        raise ValueError(f"demand profile {name!r}: rates must be nonnegative")
+    return DemandProfile(name, origin, destination, times, rates)
+
+
+def _scenario_from_mapping(name: str, raw: dict[str, Any]) -> TrafficScenario:
+    scenario = TrafficScenario(
         name=name,
-        distribution=distribution,
-        mean=mean,
-        std=std,
-        min_value=lower,
-        max_value=upper,
-        overrides=tuple(overrides),
+        initial_state=float(raw.get("initial_state", 0.0)),
+        demand_scale=float(raw.get("demand_scale", 1.0)),
+        demand_noise_std=float(raw.get("demand_noise_std", 0.0)),
     )
+    values = (
+        scenario.initial_state,
+        scenario.demand_scale,
+        scenario.demand_noise_std,
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError(f"scenario {name!r}: values must be finite")
+    if min(values) < 0.0:
+        raise ValueError(f"scenario {name!r}: values must be nonnegative")
+    return scenario
 
 
 def load_config(path: str | Path) -> ExperimentConfig:
@@ -284,26 +267,14 @@ def load_config(path: str | Path) -> ExperimentConfig:
         raise ValueError("u_low must be smaller than u_high")
 
     objective_raw = raw["objective"]
-    objective = ObjectiveConfig(
-        horizon=int(objective_raw["horizon"]),
-        state_weight=float(objective_raw.get("state_weight", 1.0)),
-        control_weight=float(objective_raw.get("control_weight", 0.0)),
-        control_rate_weight=float(objective_raw.get("control_rate_weight", 0.0)),
-    )
-    if objective.horizon < 1:
-        raise ValueError("objective horizon must be positive")
-    objective_weights = (
-        objective.state_weight,
-        objective.control_weight,
-        objective.control_rate_weight,
-    )
-    if not all(math.isfinite(value) and value >= 0.0 for value in objective_weights):
-        raise ValueError("objective weights must be finite and nonnegative")
+    objective = ObjectiveConfig(horizon=int(objective_raw["horizon"]))
+    if objective.horizon < 2:
+        raise ValueError("objective horizon must be at least two")
     policy_raw = raw["policy"]
     policy = PolicyConfig(
-        hidden_dim=int(policy_raw.get("hidden_dim", 256)),
+        hidden_dim=int(policy_raw.get("hidden_dim", 128)),
         num_hidden_layers=int(policy_raw.get("num_hidden_layers", 3)),
-        activation=str(policy_raw.get("activation", "gelu")),
+        activation=str(policy_raw.get("activation", "tanh")),
     )
     if policy.hidden_dim < 1 or policy.num_hidden_layers < 1:
         raise ValueError("policy dimensions must be positive")
@@ -311,6 +282,7 @@ def load_config(path: str | Path) -> ExperimentConfig:
         raise ValueError(f"unsupported policy activation {policy.activation!r}")
     mppi_raw = raw.get("mppi", raw.get("naive_mppi", {}))
     mppi = MPPIConfig(
+        planning_horizon=int(mppi_raw.get("planning_horizon", 8)),
         samples=int(mppi_raw.get("samples", 128)),
         iterations=int(mppi_raw.get("iterations", 1)),
         temperature=float(mppi_raw.get("temperature", 1.0)),
@@ -319,6 +291,8 @@ def load_config(path: str | Path) -> ExperimentConfig:
         smoothing_window=int(mppi_raw.get("smoothing_window", 5)),
         smoothing_polynomial=int(mppi_raw.get("smoothing_polynomial", 2)),
     )
+    if mppi.planning_horizon < 2:
+        raise ValueError("MPPI planning_horizon must be at least two")
     if mppi.samples < 1 or mppi.iterations < 1:
         raise ValueError("MPPI samples and iterations must be positive")
     mppi_floats = (
@@ -343,28 +317,17 @@ def load_config(path: str | Path) -> ExperimentConfig:
         )
     training_raw = raw["training"]
     training = TrainingConfig(
-        sample_pool_size=int(training_raw.get("sample_pool_size", 50_000)),
-        epochs=int(training_raw.get("epochs", 100)),
-        steps_per_epoch=int(training_raw.get("steps_per_epoch", 200)),
-        batch_size=int(training_raw.get("batch_size", 512)),
-        learning_rate=float(training_raw.get("learning_rate", 2e-3)),
-        weight_decay=float(training_raw.get("weight_decay", 1e-5)),
-        gradient_clip=float(training_raw.get("gradient_clip", 1.0)),
+        epochs=int(training_raw.get("epochs", 1_000)),
+        steps_per_epoch=int(training_raw.get("steps_per_epoch", 1)),
+        batch_size=int(training_raw.get("batch_size", 256)),
+        learning_rate=float(training_raw.get("learning_rate", 1e-4)),
+        weight_decay=float(training_raw.get("weight_decay", 1e-6)),
     )
-    if (
-        min(
-            training.sample_pool_size,
-            training.epochs,
-            training.steps_per_epoch,
-            training.batch_size,
-        )
-        < 1
-    ):
+    if min(training.epochs, training.steps_per_epoch, training.batch_size) < 1:
         raise ValueError("training sizes and iteration counts must be positive")
     training_floats = (
         training.learning_rate,
         training.weight_decay,
-        training.gradient_clip,
     )
     if not all(math.isfinite(value) for value in training_floats):
         raise ValueError("training floating-point settings must be finite")
@@ -372,14 +335,32 @@ def load_config(path: str | Path) -> ExperimentConfig:
         raise ValueError("training learning_rate must be positive")
     if training.weight_decay < 0.0:
         raise ValueError("training weight_decay must be nonnegative")
-    if training.gradient_clip <= 0.0:
-        raise ValueError("training gradient_clip must be positive")
+    simulation_raw = raw["simulation"]
+    simulation = SimulationConfig(
+        state_noise_std=float(simulation_raw.get("state_noise_std", 0.25))
+    )
+    if not math.isfinite(simulation.state_noise_std):
+        raise ValueError("simulation state_noise_std must be finite")
+    if simulation.state_noise_std < 0.0:
+        raise ValueError("simulation state_noise_std must be nonnegative")
+    demand_profiles = tuple(
+        _demand_profile_from_mapping(item, regions)
+        for item in raw.get("demand_profiles", [])
+    )
+    if not demand_profiles:
+        raise ValueError("at least one demand profile is required")
+    profile_names = [profile.name for profile in demand_profiles]
+    if len(set(profile_names)) != len(profile_names):
+        raise ValueError("demand profile names must be unique")
+    od_pairs = [(profile.origin, profile.destination) for profile in demand_profiles]
+    if len(set(od_pairs)) != len(od_pairs):
+        raise ValueError("demand profile origin-destination pairs must be unique")
     scenarios = {
-        name: _scenario_from_mapping(name, scenario_raw, regions)
+        name: _scenario_from_mapping(name, scenario_raw)
         for name, scenario_raw in raw["scenarios"].items()
     }
     if not scenarios:
-        raise ValueError("at least one initial-state scenario is required")
+        raise ValueError("at least one traffic scenario is required")
     return ExperimentConfig(
         seed=int(raw.get("seed", 0)),
         environment=environment,
@@ -387,5 +368,7 @@ def load_config(path: str | Path) -> ExperimentConfig:
         policy=policy,
         mppi=mppi,
         training=training,
+        simulation=simulation,
+        demand_profiles=demand_profiles,
         scenarios=scenarios,
     )

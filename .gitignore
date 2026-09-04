@@ -6,7 +6,6 @@ __pycache__/
 dist/
 build/
 *.egg-info/
-checkpoints/*_trained.msgpack
+checkpoints/*.msgpack
 checkpoints/*.json
-!checkpoints/dpc_policy.provenance.json
 results/

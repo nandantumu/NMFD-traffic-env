@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
@@ -22,48 +20,34 @@ def _activation(name: str):
         raise ValueError(f"unsupported activation {name!r}") from error
 
 
-def _linear_uniform():
-    def initialize(key, shape, dtype=jnp.float32):
-        bound = 1.0 / jnp.sqrt(jnp.asarray(shape[0], dtype=dtype))
-        return jax.random.uniform(key, shape, dtype, minval=-bound, maxval=bound)
-
-    return initialize
-
-
 class DPCPolicy(nn.Module):
-    """Deterministic bounded MLP policy used for differentiable predictive control."""
+    """Deterministic perimeter-control policy used by DPC.
+
+    Hidden activations are configured independently from the final sigmoid. The
+    sigmoid-affine output map is Equation (17) of Tumu et al. (2024) and makes
+    every control feasible by construction.
+    """
 
     input_dim: int
     control_dim: int
-    hidden_dim: int = 256
+    hidden_dim: int = 128
     num_hidden_layers: int = 3
-    activation: str = "gelu"
-    bounds_low: Sequence[float] | None = None
-    bounds_high: Sequence[float] | None = None
+    activation: str = "tanh"
+    bounds_low: float = 0.1
+    bounds_high: float = 0.9
 
     @nn.compact
     def __call__(self, state: jax.Array, train: bool = False) -> jax.Array:
         activation = _activation(self.activation)
-        initializer = _linear_uniform()
         hidden = state
         for _ in range(self.num_hidden_layers):
-            hidden = nn.Dense(
-                self.hidden_dim,
-                kernel_init=initializer,
-                bias_init=initializer,
-            )(hidden)
+            hidden = nn.Dense(self.hidden_dim)(hidden)
             hidden = activation(hidden)
 
-        raw_control = nn.Dense(
-            self.control_dim,
-            kernel_init=nn.initializers.zeros_init(),
-            bias_init=nn.initializers.zeros_init(),
-        )(hidden)
-        if self.bounds_low is None or self.bounds_high is None:
-            return raw_control
+        raw_control = nn.Dense(self.control_dim)(hidden)
         lower = jnp.asarray(self.bounds_low, dtype=raw_control.dtype)
         upper = jnp.asarray(self.bounds_high, dtype=raw_control.dtype)
-        return 0.5 * (upper + lower) + 0.5 * (upper - lower) * jnp.tanh(raw_control)
+        return lower + (upper - lower) * nn.sigmoid(raw_control)
 
 
 def create_policy(config: PolicyConfig, params: NMFDParameters) -> DPCPolicy:
@@ -75,6 +59,6 @@ def create_policy(config: PolicyConfig, params: NMFDParameters) -> DPCPolicy:
         hidden_dim=config.hidden_dim,
         num_hidden_layers=config.num_hidden_layers,
         activation=config.activation,
-        bounds_low=(params.u_low,) * params.control_dim,
-        bounds_high=(params.u_high,) * params.control_dim,
+        bounds_low=params.u_low,
+        bounds_high=params.u_high,
     )

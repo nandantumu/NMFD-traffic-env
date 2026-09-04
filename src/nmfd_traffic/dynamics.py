@@ -103,17 +103,58 @@ def step(
     return jax.lax.fori_loop(0, params.n_substeps, body, state)
 
 
+def step_with_noise(
+    state: jax.Array,
+    control: jax.Array,
+    params: NMFDParameters,
+    demand: jax.Array | None = None,
+    state_noise: jax.Array | None = None,
+) -> jax.Array:
+    """Advance the NMFD model, add state noise, and enforce nonnegativity."""
+
+    next_state = step(state, control, params, demand)
+    if state_noise is not None:
+        if state_noise.shape[-1] != params.state_dim:
+            raise ValueError(f"state_noise must have last dimension {params.state_dim}")
+        next_state = next_state + state_noise
+    return jnp.clip(next_state, min=0.0)
+
+
 def rollout_controls(
     initial_state: jax.Array,
     controls: jax.Array,
     params: NMFDParameters,
+    demand: jax.Array | None = None,
+    state_noise: jax.Array | None = None,
 ) -> jax.Array:
-    """Roll out a supplied control sequence and include the initial state."""
+    """Roll out controls under optional demand/noise and include the initial state."""
 
-    def body(current: jax.Array, control: jax.Array):
-        next_state = step(current, control, params)
+    batch_size, horizon, _ = controls.shape
+    if demand is None:
+        demand = jnp.zeros(
+            (batch_size, horizon, params.state_dim), dtype=initial_state.dtype
+        )
+    if state_noise is None:
+        state_noise = jnp.zeros_like(demand)
+    if demand.shape != (batch_size, horizon, params.state_dim):
+        raise ValueError("demand must match the control batch and horizon")
+    if state_noise.shape != demand.shape:
+        raise ValueError("state_noise must have the same shape as demand")
+
+    def body(current: jax.Array, inputs: tuple[jax.Array, ...]):
+        control, current_demand, current_noise = inputs
+        next_state = step_with_noise(
+            current,
+            control,
+            params,
+            current_demand,
+            current_noise,
+        )
         return next_state, next_state
 
-    _, states = jax.lax.scan(body, initial_state, jnp.swapaxes(controls, 0, 1))
+    scan_inputs = tuple(
+        jnp.swapaxes(value, 0, 1) for value in (controls, demand, state_noise)
+    )
+    _, states = jax.lax.scan(body, initial_state, scan_inputs)
     states = jnp.swapaxes(states, 0, 1)
     return jnp.concatenate([initial_state[:, None, :], states], axis=1)

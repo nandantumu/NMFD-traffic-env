@@ -113,40 +113,29 @@ dimension.
 ## NMFD objective mapping
 
 The paper distinguishes the state-dependent trajectory cost from the
-importance-sampling control correction. This environment uses
+importance-sampling control correction. For direct comparison with DPC, this
+environment uses the traffic objective from Equation (16a) of Tumu et al.:
 
 ```text
-c(x[t])     = state_weight * ||x[t]||_2^2
-phi(x[T])   = state_weight * ||x[T]||_2^2.
+S(V; x[0]) = dt * sum(t=1..T-1, ||x[t]||_1).
 ```
 
-Using the same quadratic for `phi` preserves the legacy controller's inclusion
-of the last predicted state while making the terminal cost explicit. The
-initial state cost is identical for all samples in an update and therefore does
-not affect their normalized weights.
+The shared function in `src/nmfd_traffic/objective.py` computes this value in
+vehicle-seconds for both controllers. There are no additional state, control,
+or control-rate weights, and the generic MPPI terminal term `phi(x[T])` is
+zero. MPPI still adds the 2017 covariance-aware
+importance-sampling term when calculating sample weights; that term is part of
+the MPPI estimator rather than an NMFD performance objective.
 
-`control_weight` and `control_rate_weight` are repository-level objective
-settings, not terms prescribed in this form by the paper. The default
-paper-comparison configuration sets both to zero. If enabled, they are explicit
-NMFD-specific extensions to `S`, not replacements for the importance-sampling
-correction:
+The prediction rollout receives the known time-varying demand forecast. The
+executed plant receives the same demand and state-noise realization as DPC and
+the open-gates baseline. MPPI plans against the expected state dynamics rather
+than future noise samples.
 
-```text
-additional control cost = control_weight
-                          * sum_t ||g(v[t])||_2^2
-
-additional rate cost    = control_rate_weight
-                          * sum_{t=1}^{T-1}
-                            ||g(v[t]) - g(v[t - 1])||_2^2.
-```
-
-The rate definition above matches the existing DPC loss: it compares adjacent
-controls inside the planned sequence and does not compare the first planned
-control with the previously executed action. Changing that boundary convention
-would require an explicit API and objective change.
-
-Evaluation reports label results from nonzero extension weights so a
-modified objective is not presented as a direct reproduction of the paper.
+The default MPPI planning horizon is eight control intervals, matching the
+online MPC horizon reported in the traffic paper while the full evaluation and
+DPC training rollout remain 240 steps. Horizon length is application-specific
+and is not prescribed by the 2017 MPPI algorithm.
 
 ## Legacy-to-current comparison
 
@@ -158,7 +147,7 @@ The implementation pass replaced the following legacy behaviors.
 | Weight shape | One weight per sample and horizon index | One weight per sample |
 | Temperature | Cost gap divided by sampled cost range and `temperature` | Corrected cost divided by fixed `lambda` |
 | Control term | Quadratic cost of the clipped sampled control | Covariance-aware importance-sampling correction |
-| Terminal cost | Final state included implicitly as a next-state stage cost | Explicit `phi(x[T])` |
+| Traffic objective | Quadratic accumulation cost | Shared L1 total vehicle time from the traffic DPC paper |
 | Covariance | Scalar independent standard deviation | Positive-definite `Sigma`; scalar diagonal is a supported special case |
 | Constraints | Perturbation clipped before both rollout and update | Sampled input is clamped for rollout evaluation; raw perturbation updates the mean |
 | Recovery samples | Every sample is centered on the nominal sequence | Configurable `alpha` fraction is zero-centered |
@@ -180,8 +169,8 @@ The focused MPPI tests demonstrate the following:
   while multiplying their range changes concentration as fixed `lambda`
   requires;
 - each sampled trajectory has one weight shared across every horizon index;
-- the score includes the covariance-aware importance-sampling correction and
-  the explicit terminal cost;
+- the score includes the shared L1 traffic objective and covariance-aware
+  importance-sampling correction;
 - raw perturbations, rather than clipped perturbations, drive the nominal
   sequence update;
 - control clamping affects simulated dynamics and keeps executed controls
@@ -189,14 +178,13 @@ The focused MPPI tests demonstrate the following:
 - nominal-centered and zero-centered sample branches follow `alpha`;
 - smoothing, execution, sequence shifting, and terminal initialization match
   Algorithm 1;
-- nonzero NMFD control and rate weights affect the result and are reported as
-  extensions;
+- known demand is propagated through every sampled trajectory;
 - seeded execution is reproducible, and the rollout remains compatible with
   `jax.jit`, `jax.vmap`, and native batched execution.
 
 Evaluation output records the paper title, DOI, covariance convention,
 `temperature` (the paper's `lambda`), `alpha`, derived `gamma`, smoothing
-parameters, and whether either NMFD-specific objective extension is enabled.
+parameters, and the shared traffic objective.
 
 ## References
 
@@ -207,9 +195,13 @@ parameters, and whether either NMFD-specific objective extension is enabled.
 - G. Williams, A. Aldrich, and E. A. Theodorou, “Model Predictive Path Integral
   Control using Covariance Variable Importance Sampling,” 2015.
   [DOI][2015-doi] · [author manuscript][2015-paper]
+- R. Tumu, W. Shaw Cortez, J. Drgoňa, D. L. Vrabie, and S. Glavaski,
+  “Differentiable Predictive Control for Large-Scale Urban Road Networks,”
+  2024. [author manuscript][traffic-paper]
 
 [2017-doi]: https://doi.org/10.1109/TRO.2018.2865891
 [2017-paper]: https://arxiv.org/abs/1707.02342
 [2015-doi]: https://doi.org/10.48550/arXiv.1509.01149
 [2015-paper]: https://arxiv.org/abs/1509.01149
 [acds-overview]: https://acdslab.github.io/mppi-generic-website/docs/mppi.html
+[traffic-paper]: https://arxiv.org/abs/2406.10433

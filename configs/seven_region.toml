@@ -1,11 +1,14 @@
+# Perimeter-control experiment based on Tumu et al. (2024), arXiv:2406.10433.
+# Figure 4 publishes the demand graphically rather than as numeric samples. The
+# profiles below are documented piecewise-linear approximations of that figure.
 seed = 0
 
 [environment]
 num_regions = 7
-dt = 120.0
-n_substeps = 4
-u_low = 0.2
-u_high = 0.8
+dt = 30.0
+n_substeps = 1
+u_low = 0.1
+u_high = 0.9
 a = 4.133e-11
 b = -8.282e-7
 c = 0.0042
@@ -20,104 +23,84 @@ adjacency = [
 ]
 
 [objective]
-horizon = 40
-state_weight = 1.0
-control_weight = 0.0
-control_rate_weight = 0.0
+# The paper uses the full 240-step experiment as the DPC training horizon.
+horizon = 240
 
 [policy]
-hidden_dim = 512
-num_hidden_layers = 5
-activation = "gelu"
+# Three hidden layers, as requested for this implementation pass. The paper
+# states that every hidden/feature width is 128 but does not tabulate its depth.
+hidden_dim = 128
+num_hidden_layers = 3
+activation = "tanh"
+
+[simulation]
+# Standard deviation of the additive state/measurement noise in the paper.
+state_noise_std = 0.25
 
 [mppi]
+# The traffic paper's online MPC benchmark uses an eight-step horizon.
+planning_horizon = 8
 samples = 128
 iterations = 1
-# The paper's inverse temperature lambda.
 temperature = 1.0
-# Isotropic exploration covariance: Sigma = noise_std^2 * identity.
 noise_std = 1.0
-# Fraction of samples drawn without the nominal control sequence.
 alpha = 0.01
-# Savitzky-Golay filter applied to the weighted perturbation update.
 smoothing_window = 5
 smoothing_polynomial = 2
 
 [training]
-sample_pool_size = 50000
-epochs = 100
-steps_per_epoch = 200
-batch_size = 512
-learning_rate = 2e-3
-weight_decay = 1e-5
-gradient_clip = 1.0
+# The paper reports the optimizer settings but not the number of updates. This
+# default performs 1,000 updates; use CLI overrides for a longer study.
+epochs = 1000
+steps_per_epoch = 1
+batch_size = 256
+learning_rate = 1e-4
+weight_decay = 1e-6
 
-[scenarios.in_distribution]
-distribution = "normal"
-mean = 150.0
-std = 20.0
-min_value = 0.0
-max_value = 1000.0
+# Demand is a flattened (origin region, final destination) spawn-rate matrix in
+# vehicles/second. These five paths and their timing approximate Figure 4.
+[[demand_profiles]]
+name = "spawn_0_to_6"
+origin = 0
+destination = 6
+times = [0, 210, 300, 420, 540, 720, 900, 1080, 1200, 1230, 7200]
+rates = [0, 0, 8.0, 10.5, 5.0, 9.0, 5.5, 2.5, 4.0, 0, 0]
 
-[[scenarios.in_distribution.overrides]]
-row = 1
-column = 5
-mean = 4000.0
-std = 100.0
-max_value = 15000.0
+[[demand_profiles]]
+name = "spawn_6_to_0"
+origin = 6
+destination = 0
+times = [0, 390, 510, 630, 750, 840, 930, 1050, 1170, 1230, 7200]
+rates = [0, 0, 2.0, 5.0, 8.0, 15.5, 9.0, 12.0, 14.0, 0, 0]
 
-[[scenarios.in_distribution.overrides]]
-row = 0
-column = 6
-mean = 4000.0
-std = 100.0
-max_value = 15000.0
+[[demand_profiles]]
+name = "spawn_4_to_2"
+origin = 4
+destination = 2
+times = [0, 420, 600, 780, 960, 1140, 1260, 1500, 1650, 1680, 7200]
+rates = [0, 0, 2.5, 7.0, 5.5, 10.0, 6.0, 4.5, 5.0, 0, 0]
 
-[[scenarios.in_distribution.overrides]]
-row = 5
-column = 0
-mean = 4000.0
-std = 100.0
-max_value = 15000.0
+[[demand_profiles]]
+name = "spawn_5_to_1"
+origin = 5
+destination = 1
+times = [0, 450, 600, 780, 960, 1140, 1320, 1560, 1800, 2100, 2400, 2550, 2580, 7200]
+rates = [0, 0, 2.0, 5.5, 4.0, 3.0, 6.0, 3.5, 4.5, 3.0, 2.0, 1.0, 0, 0]
 
-[[scenarios.in_distribution.overrides]]
-row = 6
-column = 1
-mean = 4000.0
-std = 100.0
-max_value = 15000.0
+[[demand_profiles]]
+name = "spawn_1_to_5"
+origin = 1
+destination = 5
+times = [0, 1170, 1200, 1380, 1500, 1680, 1800, 1980, 2160, 2370, 2400, 7200]
+rates = [0, 0, 6.0, 9.0, 7.0, 9.5, 3.0, 6.0, 3.0, 2.0, 0, 0]
 
-[scenarios.out_of_distribution]
-distribution = "normal"
-mean = 200.0
-std = 40.0
-min_value = 0.0
-max_value = 1500.0
+[scenarios.nominal]
+initial_state = 0.0
+demand_scale = 1.0
+demand_noise_std = 0.0
 
-[[scenarios.out_of_distribution.overrides]]
-row = 1
-column = 5
-mean = 5000.0
-std = 200.0
-max_value = 18000.0
-
-[[scenarios.out_of_distribution.overrides]]
-row = 0
-column = 6
-mean = 5000.0
-std = 200.0
-max_value = 18000.0
-
-[[scenarios.out_of_distribution.overrides]]
-row = 5
-column = 0
-mean = 5000.0
-std = 200.0
-max_value = 18000.0
-
-[[scenarios.out_of_distribution.overrides]]
-row = 6
-column = 1
-mean = 5000.0
-std = 200.0
-max_value = 18000.0
+[scenarios.noisy_demand]
+initial_state = 0.0
+demand_scale = 1.0
+# The paper evaluates several values; 1.0 is a representative shifted case.
+demand_noise_std = 1.0
