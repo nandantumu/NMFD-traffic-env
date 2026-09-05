@@ -205,6 +205,14 @@ uv build --wheel
 See [CONTRIBUTING.md](CONTRIBUTING.md) for readability, testing, documentation,
 and JAX transformation expectations.
 
+## Recommended citation
+
+If this repository contributes to your work, cite the DPC for Traffic paper:
+
+> R. Tumu, W. Shaw Cortez, J. Drgoňa, D. L. Vrabie, and S. Glavaski,
+> “Differentiable Predictive Control for Large-Scale Urban Road Networks,”
+> 2024. [arXiv:2406.10433][dpc-paper].
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
