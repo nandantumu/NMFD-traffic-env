@@ -215,7 +215,7 @@ If this repository contributes to your work, cite the DPC for Traffic paper:
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). Note that this implementation was independently derived through the usage of OpenAI LLMs based on the cited papers.
 
 [dpc-paper]: https://arxiv.org/abs/2406.10433
 [mppi-paper]: https://arxiv.org/abs/1707.02342
